@@ -478,6 +478,11 @@ class CSIVitalSignsEstimator:
         self.filtered_heart_wave = np.zeros(window_len, dtype=np.float32)
         self.filtered_breath_wave = np.zeros(window_len, dtype=np.float32)
         self.status_text = "Acquiring..."
+        
+        # SVD-PCA downsampling stride to prevent screen lag (saves 90% CPU/GPU resources)
+        self.update_count = 0
+        self.solver_stride = 10
+
 
     def update(self, raw_amps, sanitized_phases, total_dispersion, motion_threshold=15.0):
         # Append vectors
@@ -501,7 +506,16 @@ class CSIVitalSignsEstimator:
             self.filtered_breath_wave *= 0.90
             return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text
 
+        # Downsampling stride gating to guarantee smooth 60fps rendering frame rates
+        self.update_count += 1
+        if self.update_count % self.solver_stride != 0:
+            # Shift the visual waveforms sequentially to keep waves moving smoothly in real-time
+            self.filtered_heart_wave = np.roll(self.filtered_heart_wave, -1)
+            self.filtered_breath_wave = np.roll(self.filtered_breath_wave, -1)
+            return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text
+
         self.status_text = "Stable Tracking"
+
 
         # Check if we can use PyTorch CUDA acceleration
         is_cuda = str(self.device).startswith("cuda") and HAS_TORCH

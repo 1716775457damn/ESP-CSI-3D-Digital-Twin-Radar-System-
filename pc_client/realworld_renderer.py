@@ -318,13 +318,17 @@ class RealWorldRenderer:
         # Broadcast via UDP JSON/OSC for external 3D game engines (Unity / Unreal Engine 5)
         if self.udp_broadcast_enabled:
             try:
+                bpm, brpm, _, _, vit_status = self.ai_model.latest_vitals
                 payload = {
                     "timestamp": time.time(),
                     "state_code": int(self.current_state_code),
                     "state_text": self.current_state_text,
                     "x": float(self.smooth_coords[0]),
                     "y": float(self.smooth_coords[1]),
-                    "variance": float(self.latest_metrics["variance"])
+                    "variance": float(self.latest_metrics["variance"]),
+                    "heart_rate": float(bpm),
+                    "breathing_rate": float(brpm),
+                    "vital_status": vit_status
                 }
                 msg_bytes = json.dumps(payload).encode("utf-8")
                 self.udp_socket.sendto(msg_bytes, (self.udp_ip, self.udp_port))
@@ -348,6 +352,110 @@ class RealWorldRenderer:
         title_surf = self.fonts["title"].render("🌐 Real-World 3D Digital Twin Simulation (Living Room)", True, self.colors["text"])
         self.screen.blit(title_surf, (30, 30))
         
+        # --- DRAW SOTA HOLOGRAPHIC MEDICAL HUD BOX ---
+        hud_box = pygame.Rect(30, 75, 290, 185)
+        # Translucent dark blue background
+        hud_surface = pygame.Surface((290, 185), pygame.SRCALPHA)
+        hud_surface.fill((8, 12, 28, 220)) # Translucent deep blue
+        self.screen.blit(hud_surface, (30, 75))
+        # Draw tech borders
+        pygame.draw.rect(self.screen, self.colors["border"], hud_box, width=1, border_radius=12)
+        pygame.draw.rect(self.screen, self.colors["cyan"], hud_box, width=2, border_radius=12)
+        
+        # Tech corners
+        pygame.draw.rect(self.screen, self.colors["cyan"], (30, 75, 15, 4))
+        pygame.draw.rect(self.screen, self.colors["cyan"], (30, 75, 4, 15))
+        pygame.draw.rect(self.screen, self.colors["cyan"], (320 - 15, 75, 15, 4))
+        pygame.draw.rect(self.screen, self.colors["cyan"], (320 - 4, 75, 4, 15))
+        pygame.draw.rect(self.screen, self.colors["cyan"], (30, 260 - 4, 15, 4))
+        pygame.draw.rect(self.screen, self.colors["cyan"], (30, 260 - 15, 4, 15))
+        pygame.draw.rect(self.screen, self.colors["cyan"], (320 - 15, 260 - 4, 15, 4))
+        pygame.draw.rect(self.screen, self.colors["cyan"], (320 - 4, 260 - 15, 4, 15))
+        
+        # HUD Header
+        hud_title = self.fonts["header"].render("💓 RADAR VITAL MONITOR", True, self.colors["cyan"])
+        self.screen.blit(hud_title, (45, 85))
+        
+        # Retrieve latest vitals
+        bpm, brpm, h_wave, b_wave, status_text = self.ai_model.latest_vitals
+        
+        # Pulse animation sync with computed BPM
+        pulse_angle = self.frame_count * bpm * math.pi / 1800.0
+        heart_scale = 1.0 + 0.15 * math.sin(pulse_angle)
+        
+        # Dynamic pulse color (red for normal, orange/red blinking for alerts)
+        pulse_color = self.colors["red"]
+        if "Apnea" in status_text:
+            pulse_color = self.colors["orange"] if (self.frame_count // 15) % 2 == 0 else self.colors["red"]
+            
+        # Draw holographic pulsing heart icon
+        heart_center = (65, 145)
+        hr_base = int(14 * heart_scale)
+        # Draw a beautiful vector heart
+        pygame.draw.circle(self.screen, pulse_color, (heart_center[0] - hr_base // 2, heart_center[1] - hr_base // 2), hr_base // 2)
+        pygame.draw.circle(self.screen, pulse_color, (heart_center[0] + hr_base // 2, heart_center[1] - hr_base // 2), hr_base // 2)
+        pygame.draw.polygon(self.screen, pulse_color, [
+            (heart_center[0] - hr_base, heart_center[1] - hr_base // 3),
+            (heart_center[0] + hr_base, heart_center[1] - hr_base // 3),
+            (heart_center[0], heart_center[1] + hr_base)
+        ])
+        
+        # BPM Numbers display
+        lbl_bpm_val = self.fonts["digital"].render(f"{int(bpm)}", True, self.colors["text"])
+        self.screen.blit(lbl_bpm_val, (45, 185))
+        lbl_bpm_unit = self.fonts["mono"].render("BPM (HEART)", True, self.colors["text_muted"])
+        self.screen.blit(lbl_bpm_unit, (45, 215))
+        
+        # BrPM Numbers display
+        lbl_brpm_val = self.fonts["digital"].render(f"{brpm:.1f}", True, self.colors["cyan"])
+        self.screen.blit(lbl_brpm_val, (230, 185))
+        lbl_brpm_unit = self.fonts["mono"].render("BrPM (BREATH)", True, self.colors["text_muted"])
+        self.screen.blit(lbl_brpm_unit, (215, 215))
+
+        # Status footer
+        status_color = self.colors["green"]
+        if "Apnea" in status_text or "Suppressed" in status_text:
+            status_color = self.colors["orange"]
+        lbl_status = self.fonts["mono"].render(f"SYS: {status_text.upper()}", True, status_color)
+        self.screen.blit(lbl_status, (45, 235))
+        
+        # Draw rolling ECG & PPG micro waveforms
+        w_x, w_w = 125, 180
+        # ECG Box
+        ecg_y, ecg_h = 115, 24
+        pygame.draw.rect(self.screen, (10, 14, 24), (w_x, ecg_y, w_w, ecg_h), border_radius=4)
+        pygame.draw.rect(self.screen, (20, 30, 48), (w_x, ecg_y, w_w, ecg_h), width=1, border_radius=4)
+        lbl_ecg = self.fonts["mono"].render("ECG (CARDIAC)", True, pulse_color)
+        self.screen.blit(lbl_ecg, (w_x + 5, ecg_y - 12))
+        
+        # PPG Box
+        ppg_y, ppg_h = 155, 24
+        pygame.draw.rect(self.screen, (10, 14, 24), (w_x, ppg_y, w_w, ppg_h), border_radius=4)
+        pygame.draw.rect(self.screen, (20, 30, 48), (w_x, ppg_y, w_w, ppg_h), width=1, border_radius=4)
+        lbl_ppg = self.fonts["mono"].render("PPG (RESPIRATORY)", True, self.colors["cyan"])
+        self.screen.blit(lbl_ppg, (w_x + 5, ppg_y - 12))
+
+        # Render wave paths
+        if len(h_wave) > 1:
+            h_pts = []
+            b_pts = []
+            # We downsample 256 pts to fit the 180px width
+            step = len(h_wave) / w_w
+            for idx in range(w_w):
+                src_idx = int(idx * step)
+                if src_idx < len(h_wave):
+                    hx_val = w_x + idx
+                    hy_val = ecg_y + ecg_h // 2 - int(h_wave[src_idx] * (ecg_h // 2 - 2))
+                    h_pts.append((hx_val, hy_val))
+                    
+                    by_val = ppg_y + ppg_h // 2 - int(b_wave[src_idx] * (ppg_h // 2 - 2))
+                    b_pts.append((hx_val, by_val))
+            
+            if len(h_pts) > 1:
+                pygame.draw.lines(self.screen, pulse_color, False, h_pts, width=1)
+            if len(b_pts) > 1:
+                pygame.draw.lines(self.screen, self.colors["cyan"], False, b_pts, width=1)
+                
         # Draw isometric room floor tiles (realistic wooden floor texture)
         grid_res = 12
         for i in range(grid_res):

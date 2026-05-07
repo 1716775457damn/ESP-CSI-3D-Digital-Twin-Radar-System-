@@ -41,6 +41,10 @@ class CSIDeepLearningModel:
         self.noise_floor_buffer = []
         self.adaptive_baseline = 1.0
         
+        # SOTA Vital Signs Monitoring Engine
+        self.vitals_estimator = CSIVitalSignsEstimator(num_subcarriers=self.num_subcarriers)
+        self.latest_vitals = (72.0, 15.0, np.zeros(256, dtype=np.float32), np.zeros(256, dtype=np.float32), "Initializing...")
+        
         if HAS_TORCH:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.model = self._build_pytorch_model().to(self.device)
@@ -283,6 +287,15 @@ class CSIDeepLearningModel:
         thresh_breathing = max(4.5, self.adaptive_baseline * 2.5)
         thresh_walking = max(45.0, self.adaptive_baseline * 15.0)
 
+        # --- UPDATE VITAL SIGNS ESTIMATION (WITH MOTION SUPPRESSION GATE) ---
+        if self.smoothed_phases is not None:
+            self.latest_vitals = self.vitals_estimator.update(
+                self.smoothed_amplitudes,
+                self.smoothed_phases,
+                total_dispersion,
+                motion_threshold=thresh_walking
+            )
+
         # --- PYTORCH INFERENCE ---
         if HAS_TORCH:
             try:
@@ -366,3 +379,154 @@ class CSIDeepLearningModel:
         self.is_trained = True # Activate neural coordinates instantly
         print("[AI Model] SOTA model training complete. Weights saved to 'csi_weights.pt'!")
         return True
+
+class CSIVitalSignsEstimator:
+    """
+    SOTA Non-contact Vital Signs (Breathing & Heart Rate) Estimator.
+    Employs sliding windows, static clutter subtraction, FFT brick-wall bandpass filtering,
+    dynamic subcarrier selection based on peak power ratios, and motion-gated noise suppression.
+    """
+    def __init__(self, num_subcarriers=64, fs=30.0, window_len=256):
+        self.num_subcarriers = num_subcarriers
+        self.fs = fs # 30Hz sampling rate
+        self.window_len = window_len
+        
+        # Hist buffers for raw amplitudes & unwrapped phases
+        self.amp_history = []
+        self.phase_history = []
+        
+        # Stable tracking state with EMA
+        self.current_bpm = 72.0      # Heart rate (Beats Per Minute)
+        self.current_brpm = 15.0     # Breathing rate (Breaths Per Minute)
+        self.bpm_ema_alpha = 0.08
+        self.brpm_ema_alpha = 0.10
+        
+        # Vitals Signal Waveforms to be drawn on the GUI
+        self.filtered_heart_wave = np.zeros(window_len, dtype=np.float32)
+        self.filtered_breath_wave = np.zeros(window_len, dtype=np.float32)
+        
+        # Health condition & alert text
+        self.status_text = "Acquiring..."
+
+    def update(self, raw_amps, sanitized_phases, total_dispersion, motion_threshold=15.0):
+        """
+        Processes new amplitude and phase vector.
+        Returns: estimated_bpm, estimated_brpm, filtered_heartwave, filtered_breathwave, status_text
+        """
+        # Append vectors
+        self.amp_history.append(raw_amps)
+        self.phase_history.append(sanitized_phases)
+        
+        if len(self.amp_history) > self.window_len:
+            self.amp_history.pop(0)
+            self.phase_history.pop(0)
+            
+        # If history window is not full yet, return defaults
+        if len(self.amp_history) < self.window_len:
+            self.status_text = f"Initializing Vitals... {int(len(self.amp_history)/self.window_len*100)}%"
+            return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text
+
+        # --- ENVIRONMENTAL INTERFERENCE GUARD (MOTION SUPPRESSION) ---
+        # When large physical motion occurs, mask micro chest motion calculation
+        if total_dispersion > motion_threshold:
+            self.status_text = "Suppressed (Body Motion)"
+            # Glide back slowly to normal resting vitals
+            self.current_bpm += (72.0 - self.current_bpm) * 0.01
+            self.current_brpm += (15.0 - self.current_brpm) * 0.01
+            
+            # Smoothly damp down the filtered waves to zero
+            self.filtered_heart_wave *= 0.90
+            self.filtered_breath_wave *= 0.90
+            return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text
+
+        self.status_text = "Stable Tracking"
+
+        # Convert to numpy arrays of shape (window_len, num_subcarriers)
+        amps_arr = np.array(self.amp_history, dtype=np.float32)
+        phases_arr = np.array(self.phase_history, dtype=np.float32)
+
+        # 1. STATIC ENVIRONMENTAL CLUTTER SUBTRACTION (DC Removal)
+        # Subtract the temporal mean of each subcarrier to eliminate stationary reflections (furniture, walls, etc.)
+        amps_detrend = amps_arr - np.mean(amps_arr, axis=0)
+        phases_detrend = phases_arr - np.mean(phases_arr, axis=0)
+
+        # 2. SPECTRAL ESTIMATION VIA FFT
+        # We will run rfft (real-input fast Fourier transform) along the time axis
+        F_phases = np.fft.rfft(phases_detrend, axis=0)
+        freqs = np.fft.rfftfreq(self.window_len, d=1.0/self.fs)
+
+        # 3. DEFINE VITAL SIGNS FREQUENCY BANDS
+        # Breathing: 0.12Hz - 0.40Hz (7.2 to 24 BrPM)
+        # Heartbeat: 0.80Hz - 2.10Hz (48 to 126 BPM)
+        breath_band_mask = (freqs >= 0.12) & (freqs <= 0.40)
+        heart_band_mask = (freqs >= 0.80) & (freqs <= 2.10)
+
+        # 4. DYNAMIC SUBCARRIER SELECTION (DSS)
+        # For both breathing and heart rate, select the subcarrier that has the maximum peak power 
+        # in the respective band to combat multi-path fading/nulling.
+        F_phases_abs = np.abs(F_phases) # (freqs_len, subcarriers)
+
+        # Breathing Subcarrier Selection
+        breath_power = np.sum(F_phases_abs[breath_band_mask, :], axis=0)
+        best_breath_idx = int(np.argmax(breath_power))
+        
+        # Heartbeat Subcarrier Selection
+        heart_power = np.sum(F_phases_abs[heart_band_mask, :], axis=0)
+        best_heart_idx = int(np.argmax(heart_power))
+
+        # Extract the signals of the best subcarriers
+        breath_fft = F_phases[:, best_breath_idx].copy()
+        heart_fft = F_phases[:, best_heart_idx].copy()
+
+        # 5. FFT BRICK-WALL BANDPASS FILTERING (Zeroing out of band frequencies)
+        breath_filtered_fft = np.zeros_like(breath_fft)
+        breath_filtered_fft[breath_band_mask] = breath_fft[breath_band_mask]
+        
+        heart_filtered_fft = np.zeros_like(heart_fft)
+        heart_filtered_fft[heart_band_mask] = heart_fft[heart_band_mask]
+
+        # Convert back to time domain
+        self.filtered_breath_wave = np.fft.irfft(breath_filtered_fft, n=self.window_len)
+        self.filtered_heart_wave = np.fft.irfft(heart_filtered_fft, n=self.window_len)
+
+        # Normalize waveforms to range [-1.0, 1.0] for Pygame visual scale
+        norm_factor_b = np.max(np.abs(self.filtered_breath_wave))
+        if norm_factor_b > 1e-5:
+            self.filtered_breath_wave /= norm_factor_b
+            
+        norm_factor_h = np.max(np.abs(self.filtered_heart_wave))
+        if norm_factor_h > 1e-5:
+            self.filtered_heart_wave /= norm_factor_h
+
+        # 6. ESTIMATE RADAR HEART RATE & BREATHING RATE (BPM / BrPM)
+        # Find peak index in the breathing band
+        breath_spectrum = np.abs(breath_filtered_fft)
+        breath_peak_idx = np.argmax(breath_spectrum)
+        est_breath_freq = freqs[breath_peak_idx]
+        raw_brpm = est_breath_freq * 60.0
+
+        # Find peak index in the heartbeat band
+        heart_spectrum = np.abs(heart_filtered_fft)
+        heart_peak_idx = np.argmax(heart_spectrum)
+        est_heart_freq = freqs[heart_peak_idx]
+        raw_bpm = est_heart_freq * 60.0
+
+        # Apply robust Exponential Moving Average (EMA) to combat random frequency noise hops
+        if 48.0 <= raw_bpm <= 126.0:
+            self.current_bpm += (raw_bpm - self.current_bpm) * self.bpm_ema_alpha
+        if 7.0 <= raw_brpm <= 24.0:
+            self.current_brpm += (raw_brpm - self.current_brpm) * self.brpm_ema_alpha
+
+        # Analyze medical conditions for HUD display
+        if self.current_bpm < 60.0:
+            self.status_text = "Resting (Bradycardia)"
+        elif self.current_bpm > 100.0:
+            self.status_text = "Elevated Heart Rate"
+        else:
+            self.status_text = "Stable Tracking"
+
+        # Check for potential sleep apnea (loss of breathing signal over 5s)
+        if np.var(amps_detrend[:, best_breath_idx]) < 0.01:
+            self.status_text = "⚠️ WARNING: Apnea Alert!"
+
+        return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text

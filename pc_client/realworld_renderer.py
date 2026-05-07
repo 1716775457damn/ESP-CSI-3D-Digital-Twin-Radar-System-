@@ -82,12 +82,17 @@ class RealWorldRenderer:
         self.udp_port = 5005
         try:
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Disable Windows-specific WSAECONNRESET on UDP sockets when ports are closed
+            if os.name == 'nt':
+                # SIO_UDP_CONNRESET = 0x9800000C
+                self.udp_socket.ioctl(socket.SIO_UDP_CONNRESET, False)
             print(f"[UDP Broadcaster] Socket configured successfully. Broadcasting to {self.udp_ip}:{self.udp_port}")
         except Exception as e:
             print(f"[UDP Broadcaster Error] {e}")
             self.udp_broadcast_enabled = False
         self.packet_rate = 0
         self.last_packet_count = 0
+        self.last_processed_packet_count = -1
         self.last_rate_time = time.time()
         self.connected = False
         
@@ -260,7 +265,13 @@ class RealWorldRenderer:
         # Run deep learning inference
         subcarrier_amps = self.latest_metrics["subcarriers"]
         subcarrier_phases = self.latest_metrics.get("subcarriers_phase")
-        self.current_state_code, self.target_coords, amps = self.ai_model.process_new_packet(subcarrier_amps, subcarrier_phases)
+        
+        current_pc = self.latest_metrics["packet_count"]
+        if not self.connected or current_pc != self.last_processed_packet_count:
+            self.last_processed_packet_count = current_pc
+            self.current_state_code, self.target_coords, amps = self.ai_model.process_new_packet(subcarrier_amps, subcarrier_phases)
+        else:
+            amps = self.ai_model.smoothed_amplitudes if self.ai_model.smoothed_amplitudes is not None else subcarrier_amps
         
         # --- CALIBRATION DATA GATHERING (MAIN THREAD) ---
         if self.calibration_state in [2, 4, 6, 8]:

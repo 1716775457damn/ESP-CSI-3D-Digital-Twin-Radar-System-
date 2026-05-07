@@ -84,8 +84,8 @@ class RealWorldRenderer:
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             # Disable Windows-specific WSAECONNRESET on UDP sockets when ports are closed
             if os.name == 'nt':
-                # SIO_UDP_CONNRESET = 0x9800000C
-                self.udp_socket.ioctl(socket.SIO_UDP_CONNRESET, False)
+                SIO_UDP_CONNRESET = getattr(socket, 'SIO_UDP_CONNRESET', 0x9800000C)
+                self.udp_socket.ioctl(SIO_UDP_CONNRESET, False)
             print(f"[UDP Broadcaster] Socket configured successfully. Broadcasting to {self.udp_ip}:{self.udp_port}")
         except Exception as e:
             print(f"[UDP Broadcaster Error] {e}")

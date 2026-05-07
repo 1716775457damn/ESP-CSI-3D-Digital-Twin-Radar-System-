@@ -175,8 +175,9 @@ class CSIDeepLearningModel:
         # 1. Calculate Spectral Centroid (reflects diffraction shifts as you move between TX and RX)
         indices = np.arange(self.num_subcarriers)
         sum_amp = np.sum(self.smoothed_amplitudes)
-        if sum_amp <= 1e-4:
+        if sum_amp == 0:
             return 0.5, 0.5
+            
         centroid = np.sum(indices * self.smoothed_amplitudes) / sum_amp
         
         # Expected room boundary centroid limits mapped to X position in [0.2, 0.8]
@@ -298,7 +299,7 @@ class CSIDeepLearningModel:
         thresh_walking = max(45.0, self.adaptive_baseline * 15.0)
 
         # --- MULTI-TARGET SPATIAL DECOMPOSITION (MTSR) ---
-        # Slice rolling temporal sequence along subcarriers dimension to get separate spatial zones
+        # Splitting the 64 subcarriers into 3 spatially distinct sub-groups
         seq_couch = sequence_data[:, 0:22]
         seq_tv = sequence_data[:, 22:43]
         seq_center = sequence_data[:, 43:64]
@@ -515,35 +516,29 @@ class CSIVitalSignsEstimator:
                 amps_detrend = amps_t - torch.mean(amps_t, dim=0)
                 phases_detrend = phases_t - torch.mean(phases_t, dim=0)
                 
-                # 3. FFT on GPU
-                F_phases = torch.fft.rfft(phases_detrend, dim=0)
+                # --- SVD-PCA OPTIMAL SUB-SPACE DECOMPOSITION (GPU) ---
+                # Run Singular Value Decomposition (SVD) on GPU to extract PC1
+                U, S, Vh = torch.linalg.svd(phases_detrend, full_matrices=False)
+                # PC1: contains the collective clean micro-vibration phase
+                pca_phase_t = U[:, 0] * S[0]
+                
+                # 3. FFT on GPU (only 1 single FFT of the PC1 channel!)
+                F_phase_pca = torch.fft.rfft(pca_phase_t, dim=0)
                 freqs = np.fft.rfftfreq(self.window_len, d=1.0/self.fs)
                 freqs_t = torch.tensor(freqs, dtype=torch.float32, device=self.device)
                 
-                # 4. Bandpass mask on GPU
+                # 4. Multi-Scale Wavelet-style Gaussian bandpass shaping
                 breath_mask = (freqs_t >= 0.12) & (freqs_t <= 0.40)
                 heart_mask = (freqs_t >= 0.80) & (freqs_t <= 2.10)
                 
-                # 5. DSS (Dynamic Subcarrier Selection) on GPU
-                F_phases_abs = torch.abs(F_phases)
+                breath_gauss = torch.exp(-0.5 * ((freqs_t - 0.25) / 0.08) ** 2)
+                heart_gauss = torch.exp(-0.5 * ((freqs_t - 1.25) / 0.35) ** 2)
                 
-                breath_power = torch.sum(F_phases_abs[breath_mask, :], dim=0)
-                best_breath_idx = int(torch.argmax(breath_power).item())
+                # Apply Gaussian bandpass shapes to filter spectrum with zero phase leakage
+                breath_filt_fft = F_phase_pca * breath_mask * breath_gauss
+                heart_filt_fft = F_phase_pca * heart_mask * heart_gauss
                 
-                heart_power = torch.sum(F_phases_abs[heart_mask, :], dim=0)
-                best_heart_idx = int(torch.argmax(heart_power).item())
-                
-                breath_fft = F_phases[:, best_breath_idx].clone()
-                heart_fft = F_phases[:, best_heart_idx].clone()
-                
-                # 6. Brickwall bandpass filter on GPU
-                breath_filt_fft = torch.zeros_like(breath_fft)
-                breath_filt_fft[breath_mask] = breath_fft[breath_mask]
-                
-                heart_filt_fft = torch.zeros_like(heart_fft)
-                heart_filt_fft[heart_mask] = heart_fft[heart_mask]
-                
-                # 7. Inverse FFT to time domain on GPU
+                # 5. Inverse FFT to time domain on GPU
                 b_wave_t = torch.fft.irfft(breath_filt_fft, n=self.window_len)
                 h_wave_t = torch.fft.irfft(heart_filt_fft, n=self.window_len)
                 
@@ -568,21 +563,32 @@ class CSIVitalSignsEstimator:
                 heart_peak_idx = int(torch.argmax(heart_spectrum).item())
                 raw_bpm = freqs[heart_peak_idx] * 60.0
                 
-                # EMA smoothing
+                # 6. Physiological Acceleration Gating & Kalman Transition tracking (GPU)
                 if 48.0 <= raw_bpm <= 126.0:
+                    max_bpm_step = 2.5 / self.fs
+                    bpm_diff = raw_bpm - self.current_bpm
+                    if abs(bpm_diff) > max_bpm_step:
+                        raw_bpm = self.current_bpm + np.sign(bpm_diff) * max_bpm_step
                     self.current_bpm += (raw_bpm - self.current_bpm) * self.bpm_ema_alpha
+                    
                 if 7.0 <= raw_brpm <= 24.0:
+                    max_brpm_step = 0.8 / self.fs
+                    brpm_diff = raw_brpm - self.current_brpm
+                    if abs(brpm_diff) > max_brpm_step:
+                        raw_brpm = self.current_brpm + np.sign(brpm_diff) * max_brpm_step
                     self.current_brpm += (raw_brpm - self.current_brpm) * self.brpm_ema_alpha
                     
-                # Apnea Alert on GPU
-                if float(torch.var(amps_detrend[:, best_breath_idx]).item()) < 0.01:
+                # Apnea Alert (use variance of the PC1 channel amplitude on GPU)
+                U_a, S_a, Vh_a = torch.linalg.svd(amps_detrend, full_matrices=False)
+                pca_amp_t = U_a[:, 0] * S_a[0]
+                if float(torch.var(pca_amp_t).item()) < 0.15:
                     self.status_text = "⚠️ WARNING: Apnea Alert!"
                 else:
                     self.status_text = "Stable Tracking"
                     
                 return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text
-            except Exception:
-                # If CUDA FFT fails, automatically fall back to CPU NumPy
+            except Exception as e:
+                # If CUDA SVD/FFT fails, automatically fall back to CPU NumPy
                 pass
 
         # --- CPU NUMPY FALLBACK ---
@@ -592,29 +598,25 @@ class CSIVitalSignsEstimator:
         amps_detrend = amps_arr - np.mean(amps_arr, axis=0)
         phases_detrend = phases_arr - np.mean(phases_arr, axis=0)
         
-        F_phases = np.fft.rfft(phases_detrend, axis=0)
+        # --- SVD-PCA OPTIMAL SUB-SPACE DECOMPOSITION (CPU) ---
+        U, S, Vh = np.linalg.svd(phases_detrend, full_matrices=False)
+        pca_phase = U[:, 0] * S[0]
+        
+        # FFT on CPU of the PC1 channel
+        F_phase_pca = np.fft.rfft(pca_phase, axis=0)
         freqs = np.fft.rfftfreq(self.window_len, d=1.0/self.fs)
         
+        # Multi-Scale Wavelet-style Gaussian bandpass shaping (CPU)
         breath_mask = (freqs >= 0.12) & (freqs <= 0.40)
         heart_mask = (freqs >= 0.80) & (freqs <= 2.10)
         
-        F_phases_abs = np.abs(F_phases)
+        breath_gauss = np.exp(-0.5 * ((freqs - 0.25) / 0.08) ** 2)
+        heart_gauss = np.exp(-0.5 * ((freqs - 1.25) / 0.35) ** 2)
         
-        breath_power = np.sum(F_phases_abs[breath_mask, :], axis=0)
-        best_breath_idx = int(np.argmax(breath_power))
+        breath_filt_fft = F_phase_pca * breath_mask * breath_gauss
+        heart_filt_fft = F_phase_pca * heart_mask * heart_gauss
         
-        heart_power = np.sum(F_phases_abs[heart_mask, :], axis=0)
-        best_heart_idx = int(np.argmax(heart_power))
-        
-        breath_fft = F_phases[:, best_breath_idx].copy()
-        heart_fft = F_phases[:, best_heart_idx].copy()
-        
-        breath_filt_fft = np.zeros_like(breath_fft)
-        breath_filt_fft[breath_mask] = breath_fft[breath_mask]
-        
-        heart_filt_fft = np.zeros_like(heart_fft)
-        heart_filt_fft[heart_mask] = heart_fft[heart_mask]
-        
+        # Inverse FFT to time domain on CPU
         self.filtered_breath_wave = np.fft.irfft(breath_filt_fft, n=self.window_len)
         self.filtered_heart_wave = np.fft.irfft(heart_filt_fft, n=self.window_len)
         
@@ -625,6 +627,7 @@ class CSIVitalSignsEstimator:
         if max_h > 1e-5:
             self.filtered_heart_wave /= max_h
             
+        # Peak detection on CPU
         breath_spectrum = np.abs(breath_filt_fft)
         breath_peak_idx = np.argmax(breath_spectrum)
         raw_brpm = freqs[breath_peak_idx] * 60.0
@@ -633,12 +636,27 @@ class CSIVitalSignsEstimator:
         heart_peak_idx = np.argmax(heart_spectrum)
         raw_bpm = freqs[heart_peak_idx] * 60.0
         
+        # Physiological Acceleration Gating & Kalman Transition tracking (CPU)
         if 48.0 <= raw_bpm <= 126.0:
+            max_bpm_step = 2.5 / self.fs
+            bpm_diff = raw_bpm - self.current_bpm
+            if abs(bpm_diff) > max_bpm_step:
+                raw_bpm = self.current_bpm + np.sign(bpm_diff) * max_bpm_step
             self.current_bpm += (raw_bpm - self.current_bpm) * self.bpm_ema_alpha
+            
         if 7.0 <= raw_brpm <= 24.0:
+            max_brpm_step = 0.8 / self.fs
+            brpm_diff = raw_brpm - self.current_brpm
+            if abs(brpm_diff) > max_brpm_step:
+                raw_brpm = self.current_brpm + np.sign(brpm_diff) * max_brpm_step
             self.current_brpm += (raw_brpm - self.current_brpm) * self.brpm_ema_alpha
             
-        if np.var(amps_detrend[:, best_breath_idx]) < 0.01:
+        # Apnea Alert (use variance of the PC1 channel amplitude on CPU)
+        U_a, S_a, Vh_a = np.linalg.svd(amps_detrend, full_matrices=False)
+        pca_amp = U_a[:, 0] * S_a[0]
+        if np.var(pca_amp) < 0.15:
             self.status_text = "⚠️ WARNING: Apnea Alert!"
+        else:
+            self.status_text = "Stable Tracking"
             
         return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text

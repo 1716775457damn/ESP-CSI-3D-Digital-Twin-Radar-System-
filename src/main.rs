@@ -35,6 +35,7 @@ struct CsiMetrics {
     status_text: String,
     packet_count: u64,
     subcarriers: Vec<f32>,
+    subcarriers_phase: Vec<f32>,
 }
 
 // --- C-FFI CALLBACK WITH CONCURRENCY RATE LIMITER & BSSID FILTER ---
@@ -81,7 +82,8 @@ unsafe extern "C" fn csi_rx_cb(ctx: *mut core::ffi::c_void, info: *mut wifi_csi_
         return;
     }
 
-    let mut subcarriers = Vec::with_capacity(len as usize / 2);
+    let mut subcarriers_amp = Vec::with_capacity(len as usize / 2);
+    let mut subcarriers_phase = Vec::with_capacity(len as usize / 2);
 
     // Each subcarrier uses 2 bytes: Real part (I) and Imaginary part (Q)
     for i in (0..len).step_by(2) {
@@ -93,13 +95,17 @@ unsafe extern "C" fn csi_rx_cb(ctx: *mut core::ffi::c_void, info: *mut wifi_csi_
         
         // Calculate Amplitude = sqrt(I^2 + Q^2)
         let amp = (r_val * r_val + i_val * i_val).sqrt();
-        subcarriers.push(amp);
+        // Calculate Phase = atan2(Q, I)
+        let phase = i_val.atan2(r_val);
+        
+        subcarriers_amp.push(amp);
+        subcarriers_phase.push(phase);
     }
 
-    if !subcarriers.is_empty() {
-        let tx_mutex = &*(ctx as *const std::sync::Mutex<Sender<Vec<f32>>>);
+    if !subcarriers_amp.is_empty() {
+        let tx_mutex = &*(ctx as *const std::sync::Mutex<Sender<(Vec<f32>, Vec<f32>)>>);
         if let Ok(tx) = tx_mutex.lock() {
-            let _ = tx.send(subcarriers);
+            let _ = tx.send((subcarriers_amp, subcarriers_phase));
         }
     }
 }
@@ -124,6 +130,7 @@ fn main() -> Result<()> {
         status_text: "NoMotion".to_string(),
         packet_count: 0,
         subcarriers: Vec::new(),
+        subcarriers_phase: Vec::new(),
     }));
 
     // --- WIFI STA CONNECTION (DHCP) ---
@@ -233,7 +240,7 @@ fn main() -> Result<()> {
     }
 
     // --- CHANNEL-BASED SIGNAL PIPELINE ---
-    let (tx, rx) = channel::<Vec<f32>>();
+    let (tx, rx) = channel::<(Vec<f32>, Vec<f32>)>();
     let tx_mutex = std::sync::Mutex::new(tx);
     let tx_boxed = Box::new(tx_mutex);
     let tx_ptr = Box::into_raw(tx_boxed) as *mut core::ffi::c_void;
@@ -248,12 +255,12 @@ fn main() -> Result<()> {
         let alpha = 0.1;      // EMA filter coefficient
         let mut ema_val: Option<f32> = None;
 
-        while let Ok(subcarriers_data) = rx.recv() {
-            let count = subcarriers_data.len();
+        while let Ok((subcarriers_amp, subcarriers_phase)) = rx.recv() {
+            let count = subcarriers_amp.len();
             if count == 0 {
                 continue;
             }
-            let sum: f32 = subcarriers_data.iter().sum();
+            let sum: f32 = subcarriers_amp.iter().sum();
             let amp = sum / count as f32;
 
             // 1. Exponential Moving Average smoothing
@@ -301,7 +308,8 @@ fn main() -> Result<()> {
                 s.status_code = status_code;
                 s.status_text = status_text.to_string();
                 s.packet_count += 1;
-                s.subcarriers = subcarriers_data;
+                s.subcarriers = subcarriers_amp;
+                s.subcarriers_phase = subcarriers_phase;
             }
         }
     });

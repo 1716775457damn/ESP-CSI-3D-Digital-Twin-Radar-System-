@@ -4,6 +4,7 @@ import time
 import math
 import json
 import threading
+import socket
 import numpy as np
 
 # Suppress Pygame welcome message
@@ -71,8 +72,20 @@ class RealWorldRenderer:
             "amplitude": 0.0,
             "variance": 0.0,
             "packet_count": 0,
-            "subcarriers": [0.0] * self.num_subcarriers
+            "subcarriers": [0.0] * self.num_subcarriers,
+            "subcarriers_phase": [0.0] * self.num_subcarriers
         }
+        
+        # UDP JSON/OSC Broadcast Setup (for Unity / Unreal Engine 5)
+        self.udp_broadcast_enabled = True
+        self.udp_ip = "127.0.0.1"
+        self.udp_port = 5005
+        try:
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            print(f"[UDP Broadcaster] Socket configured successfully. Broadcasting to {self.udp_ip}:{self.udp_port}")
+        except Exception as e:
+            print(f"[UDP Broadcaster Error] {e}")
+            self.udp_broadcast_enabled = False
         self.packet_rate = 0
         self.last_packet_count = 0
         self.last_rate_time = time.time()
@@ -137,6 +150,10 @@ class RealWorldRenderer:
                     subcarriers = data.get("subcarriers", [])
                     if len(subcarriers) > 0:
                         self.latest_metrics["subcarriers"] = subcarriers
+                        
+                    phases = data.get("subcarriers_phase", [])
+                    if len(phases) > 0:
+                        self.latest_metrics["subcarriers_phase"] = phases
                     
                     # Throttling
                     time.sleep(0.033)
@@ -242,7 +259,8 @@ class RealWorldRenderer:
             
         # Run deep learning inference
         subcarrier_amps = self.latest_metrics["subcarriers"]
-        self.current_state_code, self.target_coords, amps = self.ai_model.process_new_packet(subcarrier_amps)
+        subcarrier_phases = self.latest_metrics.get("subcarriers_phase")
+        self.current_state_code, self.target_coords, amps = self.ai_model.process_new_packet(subcarrier_amps, subcarrier_phases)
         
         # --- CALIBRATION DATA GATHERING (MAIN THREAD) ---
         if self.calibration_state in [2, 4, 6, 8]:
@@ -285,6 +303,22 @@ class RealWorldRenderer:
         # Smooth coordinates with exponential easing (lerp)
         self.smooth_coords[0] += (self.target_coords[0] - self.smooth_coords[0]) * 0.08
         self.smooth_coords[1] += (self.target_coords[1] - self.smooth_coords[1]) * 0.08
+        
+        # Broadcast via UDP JSON/OSC for external 3D game engines (Unity / Unreal Engine 5)
+        if self.udp_broadcast_enabled:
+            try:
+                payload = {
+                    "timestamp": time.time(),
+                    "state_code": int(self.current_state_code),
+                    "state_text": self.current_state_text,
+                    "x": float(self.smooth_coords[0]),
+                    "y": float(self.smooth_coords[1]),
+                    "variance": float(self.latest_metrics["variance"])
+                }
+                msg_bytes = json.dumps(payload).encode("utf-8")
+                self.udp_socket.sendto(msg_bytes, (self.udp_ip, self.udp_port))
+            except Exception:
+                pass
         
         # Roll the spectrogram matrix
         self.spectrogram_matrix = np.roll(self.spectrogram_matrix, -1, axis=0)

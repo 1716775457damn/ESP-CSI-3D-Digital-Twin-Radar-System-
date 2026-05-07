@@ -30,9 +30,11 @@ class CSIDeepLearningModel:
         
         # Buffer to hold rolling sequence for model input
         self.csi_buffer = []
+        self.phase_buffer = []
         
         # DSP Filter States
         self.smoothed_amplitudes = None
+        self.smoothed_phases = None
         self.ema_alpha = 0.30 # Low pass filter coeff (lower = more smoothing, less high-frequency RF noise)
         
         # Self-calibrating threshold states
@@ -179,9 +181,47 @@ class CSIDeepLearningModel:
         
         return pred_x, pred_y
 
-    def process_new_packet(self, subcarrier_amplitudes):
+    def sanitize_phase(self, raw_phase):
         """
-        Appends packet, runs high-sensitivity BiGRU inference with adaptive self-calibrating thresholds.
+        Applies Phase Unwrapping and Linear Phase Calibration (remedies CFO & SFO).
+        """
+        if raw_phase is None or len(raw_phase) == 0:
+            return np.zeros(self.num_subcarriers, dtype=np.float32)
+            
+        raw_phase = np.array(raw_phase, dtype=np.float32)
+        if len(raw_phase) != self.num_subcarriers:
+            if len(raw_phase) < self.num_subcarriers:
+                raw_phase = np.pad(raw_phase, (0, self.num_subcarriers - len(raw_phase)), 'edge')
+            else:
+                raw_phase = raw_phase[:self.num_subcarriers]
+                
+        # 1. Unwrap phase (remove 2pi phase wrap jumps)
+        unwrapped = np.unwrap(raw_phase)
+        
+        # 2. Linear fit correction (SFO & CFO mitigation)
+        n = len(unwrapped)
+        m = np.arange(n) - (n - 1) / 2.0 # center indices around zero
+        
+        mean_theta = np.mean(unwrapped)
+        mean_m = np.mean(m)
+        
+        # Slope (a) and Intercept (b) via Least Squares
+        num = np.sum((m - mean_m) * (unwrapped - mean_theta))
+        den = np.sum((m - mean_m) ** 2)
+        if den == 0:
+            return unwrapped
+            
+        a = num / den
+        b = mean_theta - a * mean_m
+        
+        # Sanitized phase: remove the linear CFO/SFO shift component
+        sanitized = unwrapped - a * m - b
+        return sanitized
+
+    def process_new_packet(self, subcarrier_amplitudes, subcarrier_phases=None):
+        """
+        Appends packet, runs high-sensitivity BiGRU inference with adaptive self-calibrating thresholds
+        and real-time SFO/CFO-corrected SOTA Phase Unwrapping.
         """
         # Ensure correct vector length
         if len(subcarrier_amplitudes) != self.num_subcarriers:
@@ -202,6 +242,18 @@ class CSIDeepLearningModel:
         self.csi_buffer.append(self.smoothed_amplitudes)
         if len(self.csi_buffer) > self.sequence_length:
             self.csi_buffer.pop(0)
+
+        # --- PROCESS SOTA PHASE UNWRAPPING ---
+        if subcarrier_phases is not None:
+            sanitized_p = self.sanitize_phase(subcarrier_phases)
+            if self.smoothed_phases is None:
+                self.smoothed_phases = sanitized_p
+            else:
+                self.smoothed_phases = self.ema_alpha * sanitized_p + (1.0 - self.ema_alpha) * self.smoothed_phases
+                
+            self.phase_buffer.append(self.smoothed_phases)
+            if len(self.phase_buffer) > self.sequence_length:
+                self.phase_buffer.pop(0)
 
         # Base fallback check
         if len(self.csi_buffer) < self.sequence_length:

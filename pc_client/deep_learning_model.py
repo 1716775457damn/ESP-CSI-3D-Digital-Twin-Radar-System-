@@ -309,8 +309,9 @@ class CSIDeepLearningModel:
         disp_center = float(np.sum(np.var(seq_center, axis=0)))
         
         # Calibrate spatial thresholds proportional to subcarriers subset size
-        thresh_b_sub = max(1.5, self.adaptive_baseline * 0.8)
-        thresh_w_sub = max(15.0, self.adaptive_baseline * 5.0)
+        # Increased to suppress environmental background noise bleed & ghost targets
+        thresh_b_sub = max(6.0, self.adaptive_baseline * 3.5)
+        thresh_w_sub = max(35.0, self.adaptive_baseline * 15.0)
         
         # Execute individual vitals estimators & classify localized state code
         v_c = self.vitals_couch.update(

@@ -140,6 +140,10 @@ class RealWorldRenderer:
         # Start background listener thread
         self.ws_thread = threading.Thread(target=self._websocket_listener, daemon=True)
         self.ws_thread.start()
+        
+        # Start background Active Sounding Prober to force high-frequency CSI sniffer firing
+        self.prober_thread = threading.Thread(target=self._active_sounding_prober, daemon=True)
+        self.prober_thread.start()
 
     def _websocket_listener(self):
         """
@@ -180,6 +184,21 @@ class RealWorldRenderer:
                 self.connected = False
                 print(f"[WS Connection] Lost connection: {e}. Retrying in 3 seconds...")
                 time.sleep(3.0)
+
+    def _active_sounding_prober(self):
+        """
+        Sends high-frequency UDP probing packets to ESP32 IP to trigger continuous Wi-Fi radio 
+        exchanges. This boosts the sniffer sampling rate from 5Hz AP beacons to a solid, stable 30Hz.
+        """
+        probe_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        dummy_data = b"\x00" * 12
+        while True:
+            if hasattr(self, "ip_address") and self.ip_address:
+                try:
+                    probe_socket.sendto(dummy_data, (self.ip_address, 80))
+                except Exception:
+                    pass
+            time.sleep(0.02) # ~50Hz probing rate to guarantee 30Hz saturated CSI
 
     def _to_iso(self, x, y, z=0):
         """
@@ -677,6 +696,21 @@ class RealWorldRenderer:
             # Label overlay above character
             lbl_user = self.fonts["mono"].render(f"{name} ({hx:.2f}, {hy:.2f})", True, theme_color)
             self.screen.blit(lbl_user, (joint_head[0] - 80, joint_head[1] - 30))
+            
+            # If this skeleton is currently focused by the HUD, draw a small pulsing heart above their head
+            if name == target_name:
+                h_p_angle = self.frame_count * bpm * math.pi / 1800.0
+                h_scale = 1.0 + 0.2 * math.sin(h_p_angle)
+                h_base = int(6 * h_scale)
+                h_x, h_y = joint_head[0], joint_head[1] - 45
+                
+                pygame.draw.circle(self.screen, (239, 68, 68), (h_x - h_base // 2, h_y - h_base // 2), h_base // 2)
+                pygame.draw.circle(self.screen, (239, 68, 68), (h_x + h_base // 2, h_y - h_base // 2), h_base // 2)
+                pygame.draw.polygon(self.screen, (239, 68, 68), [
+                    (h_x - h_base, h_y - h_base // 3),
+                    (h_x + h_base, h_y - h_base // 3),
+                    (h_x, h_y + h_base)
+                ])
             
             # Multipath wave scatter collision particles for major motion walking
             if s_code == 2 and self.frame_count % 3 == 0:

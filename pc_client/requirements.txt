@@ -1,0 +1,5 @@
+pygame>=2.5.0
+numpy>=1.20.0
+websocket-client>=1.6.0
+matplotlib>=3.5.0
+# torch>=2.0.0 (Optional: Core deep learning model works with NumPy/scikit-learn falls-back gracefully if PyTorch is not installed)

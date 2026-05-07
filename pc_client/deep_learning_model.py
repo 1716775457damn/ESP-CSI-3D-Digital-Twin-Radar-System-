@@ -41,12 +41,22 @@ class CSIDeepLearningModel:
         self.noise_floor_buffer = []
         self.adaptive_baseline = 1.0
         
-        # SOTA Vital Signs Monitoring Engine
-        self.vitals_estimator = CSIVitalSignsEstimator(num_subcarriers=self.num_subcarriers)
-        self.latest_vitals = (72.0, 15.0, np.zeros(256, dtype=np.float32), np.zeros(256, dtype=np.float32), "Initializing...")
-        
         if HAS_TORCH:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = "cpu"
+
+        # SOTA Vital Signs Monitoring Engine (Single User Fallback)
+        self.vitals_estimator = CSIVitalSignsEstimator(num_subcarriers=self.num_subcarriers, device=self.device)
+        self.latest_vitals = (72.0, 15.0, np.zeros(256, dtype=np.float32), np.zeros(256, dtype=np.float32), "Initializing...")
+        
+        # SOTA Multi-Target Spatial Resolution (MTSR) Estimators
+        self.vitals_couch = CSIVitalSignsEstimator(num_subcarriers=22, device=self.device)
+        self.vitals_tv = CSIVitalSignsEstimator(num_subcarriers=21, device=self.device)
+        self.vitals_center = CSIVitalSignsEstimator(num_subcarriers=21, device=self.device)
+        self.active_targets = []
+        
+        if HAS_TORCH:
             self.model = self._build_pytorch_model().to(self.device)
             
             # Auto-load weights if they exist (indicating model has been trained)
@@ -287,6 +297,67 @@ class CSIDeepLearningModel:
         thresh_breathing = max(4.5, self.adaptive_baseline * 2.5)
         thresh_walking = max(45.0, self.adaptive_baseline * 15.0)
 
+        # --- MULTI-TARGET SPATIAL DECOMPOSITION (MTSR) ---
+        # Slice rolling temporal sequence along subcarriers dimension to get separate spatial zones
+        seq_couch = sequence_data[:, 0:22]
+        seq_tv = sequence_data[:, 22:43]
+        seq_center = sequence_data[:, 43:64]
+        
+        # Calculate localized temporal variances (motion energy)
+        disp_couch = float(np.sum(np.var(seq_couch, axis=0)))
+        disp_tv = float(np.sum(np.var(seq_tv, axis=0)))
+        disp_center = float(np.sum(np.var(seq_center, axis=0)))
+        
+        # Calibrate spatial thresholds proportional to subcarriers subset size
+        thresh_b_sub = max(1.5, self.adaptive_baseline * 0.8)
+        thresh_w_sub = max(15.0, self.adaptive_baseline * 5.0)
+        
+        # Execute individual vitals estimators & classify localized state code
+        v_c = self.vitals_couch.update(
+            self.smoothed_amplitudes[0:22],
+            self.smoothed_phases[0:22] if self.smoothed_phases is not None else np.zeros(22, dtype=np.float32),
+            disp_couch,
+            motion_threshold=thresh_w_sub
+        )
+        v_t = self.vitals_tv.update(
+            self.smoothed_amplitudes[22:43],
+            self.smoothed_phases[22:43] if self.smoothed_phases is not None else np.zeros(21, dtype=np.float32),
+            disp_tv,
+            motion_threshold=thresh_w_sub
+        )
+        v_ce = self.vitals_center.update(
+            self.smoothed_amplitudes[43:64],
+            self.smoothed_phases[43:64] if self.smoothed_phases is not None else np.zeros(21, dtype=np.float32),
+            disp_center,
+            motion_threshold=thresh_w_sub
+        )
+        
+        self.active_targets = []
+        if disp_couch >= thresh_b_sub:
+            self.active_targets.append({
+                "name": "USER A (COUCH)",
+                "x": 0.28,
+                "y": 0.35,
+                "state_code": 2 if disp_couch >= thresh_w_sub else 1,
+                "vitals": v_c
+            })
+        if disp_tv >= thresh_b_sub:
+            self.active_targets.append({
+                "name": "USER B (TV ZONE)",
+                "x": 0.72,
+                "y": 0.72,
+                "state_code": 2 if disp_tv >= thresh_w_sub else 1,
+                "vitals": v_t
+            })
+        if disp_center >= thresh_b_sub:
+            self.active_targets.append({
+                "name": "USER C (CENTER)",
+                "x": 0.50,
+                "y": 0.50,
+                "state_code": 2 if disp_center >= thresh_w_sub else 1,
+                "vitals": v_ce
+            })
+
         # --- UPDATE VITAL SIGNS ESTIMATION (WITH MOTION SUPPRESSION GATE) ---
         if self.smoothed_phases is not None:
             self.latest_vitals = self.vitals_estimator.update(
@@ -383,36 +454,30 @@ class CSIDeepLearningModel:
 class CSIVitalSignsEstimator:
     """
     SOTA Non-contact Vital Signs (Breathing & Heart Rate) Estimator.
-    Employs sliding windows, static clutter subtraction, FFT brick-wall bandpass filtering,
-    dynamic subcarrier selection based on peak power ratios, and motion-gated noise suppression.
+    Features optional PyTorch-CUDA acceleration to process heavy FFTs and matrix math
+    on the GPU, falling back to pure NumPy on CPU if GPU is not available.
     """
-    def __init__(self, num_subcarriers=64, fs=30.0, window_len=256):
+    def __init__(self, num_subcarriers=64, fs=30.0, window_len=256, device="cpu"):
         self.num_subcarriers = num_subcarriers
-        self.fs = fs # 30Hz sampling rate
+        self.fs = fs
         self.window_len = window_len
+        self.device = device
         
-        # Hist buffers for raw amplitudes & unwrapped phases
+        # Buffers
         self.amp_history = []
         self.phase_history = []
         
-        # Stable tracking state with EMA
-        self.current_bpm = 72.0      # Heart rate (Beats Per Minute)
-        self.current_brpm = 15.0     # Breathing rate (Breaths Per Minute)
+        # State
+        self.current_bpm = 72.0
+        self.current_brpm = 15.0
         self.bpm_ema_alpha = 0.08
         self.brpm_ema_alpha = 0.10
         
-        # Vitals Signal Waveforms to be drawn on the GUI
         self.filtered_heart_wave = np.zeros(window_len, dtype=np.float32)
         self.filtered_breath_wave = np.zeros(window_len, dtype=np.float32)
-        
-        # Health condition & alert text
         self.status_text = "Acquiring..."
 
     def update(self, raw_amps, sanitized_phases, total_dispersion, motion_threshold=15.0):
-        """
-        Processes new amplitude and phase vector.
-        Returns: estimated_bpm, estimated_brpm, filtered_heartwave, filtered_breathwave, status_text
-        """
         # Append vectors
         self.amp_history.append(raw_amps)
         self.phase_history.append(sanitized_phases)
@@ -421,112 +486,158 @@ class CSIVitalSignsEstimator:
             self.amp_history.pop(0)
             self.phase_history.pop(0)
             
-        # If history window is not full yet, return defaults
         if len(self.amp_history) < self.window_len:
-            self.status_text = f"Initializing Vitals... {int(len(self.amp_history)/self.window_len*100)}%"
+            self.status_text = f"Acquiring... {int(len(self.amp_history)/self.window_len*100)}%"
             return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text
 
-        # --- ENVIRONMENTAL INTERFERENCE GUARD (MOTION SUPPRESSION) ---
-        # When large physical motion occurs, mask micro chest motion calculation
+        # Motion suppression
         if total_dispersion > motion_threshold:
             self.status_text = "Suppressed (Body Motion)"
-            # Glide back slowly to normal resting vitals
             self.current_bpm += (72.0 - self.current_bpm) * 0.01
             self.current_brpm += (15.0 - self.current_brpm) * 0.01
-            
-            # Smoothly damp down the filtered waves to zero
             self.filtered_heart_wave *= 0.90
             self.filtered_breath_wave *= 0.90
             return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text
 
         self.status_text = "Stable Tracking"
 
-        # Convert to numpy arrays of shape (window_len, num_subcarriers)
+        # Check if we can use PyTorch CUDA acceleration
+        is_cuda = str(self.device).startswith("cuda") and HAS_TORCH
+        
+        if is_cuda:
+            try:
+                # 1. Load data to GPU CUDA
+                amps_t = torch.tensor(np.array(self.amp_history), dtype=torch.float32, device=self.device)
+                phases_t = torch.tensor(np.array(self.phase_history), dtype=torch.float32, device=self.device)
+                
+                # 2. Clutter subtraction (DC remove) on GPU
+                amps_detrend = amps_t - torch.mean(amps_t, dim=0)
+                phases_detrend = phases_t - torch.mean(phases_t, dim=0)
+                
+                # 3. FFT on GPU
+                F_phases = torch.fft.rfft(phases_detrend, dim=0)
+                freqs = np.fft.rfftfreq(self.window_len, d=1.0/self.fs)
+                freqs_t = torch.tensor(freqs, dtype=torch.float32, device=self.device)
+                
+                # 4. Bandpass mask on GPU
+                breath_mask = (freqs_t >= 0.12) & (freqs_t <= 0.40)
+                heart_mask = (freqs_t >= 0.80) & (freqs_t <= 2.10)
+                
+                # 5. DSS (Dynamic Subcarrier Selection) on GPU
+                F_phases_abs = torch.abs(F_phases)
+                
+                breath_power = torch.sum(F_phases_abs[breath_mask, :], dim=0)
+                best_breath_idx = int(torch.argmax(breath_power).item())
+                
+                heart_power = torch.sum(F_phases_abs[heart_mask, :], dim=0)
+                best_heart_idx = int(torch.argmax(heart_power).item())
+                
+                breath_fft = F_phases[:, best_breath_idx].clone()
+                heart_fft = F_phases[:, best_heart_idx].clone()
+                
+                # 6. Brickwall bandpass filter on GPU
+                breath_filt_fft = torch.zeros_like(breath_fft)
+                breath_filt_fft[breath_mask] = breath_fft[breath_mask]
+                
+                heart_filt_fft = torch.zeros_like(heart_fft)
+                heart_filt_fft[heart_mask] = heart_fft[heart_mask]
+                
+                # 7. Inverse FFT to time domain on GPU
+                b_wave_t = torch.fft.irfft(breath_filt_fft, n=self.window_len)
+                h_wave_t = torch.fft.irfft(heart_filt_fft, n=self.window_len)
+                
+                # Normalize on GPU
+                max_b = torch.max(torch.abs(b_wave_t))
+                if max_b > 1e-5:
+                    b_wave_t /= max_b
+                max_h = torch.max(torch.abs(h_wave_t))
+                if max_h > 1e-5:
+                    h_wave_t /= max_h
+                    
+                # Load back to CPU
+                self.filtered_breath_wave = b_wave_t.cpu().numpy()
+                self.filtered_heart_wave = h_wave_t.cpu().numpy()
+                
+                # Peak detection on GPU
+                breath_spectrum = torch.abs(breath_filt_fft)
+                breath_peak_idx = int(torch.argmax(breath_spectrum).item())
+                raw_brpm = freqs[breath_peak_idx] * 60.0
+                
+                heart_spectrum = torch.abs(heart_filt_fft)
+                heart_peak_idx = int(torch.argmax(heart_spectrum).item())
+                raw_bpm = freqs[heart_peak_idx] * 60.0
+                
+                # EMA smoothing
+                if 48.0 <= raw_bpm <= 126.0:
+                    self.current_bpm += (raw_bpm - self.current_bpm) * self.bpm_ema_alpha
+                if 7.0 <= raw_brpm <= 24.0:
+                    self.current_brpm += (raw_brpm - self.current_brpm) * self.brpm_ema_alpha
+                    
+                # Apnea Alert on GPU
+                if float(torch.var(amps_detrend[:, best_breath_idx]).item()) < 0.01:
+                    self.status_text = "⚠️ WARNING: Apnea Alert!"
+                else:
+                    self.status_text = "Stable Tracking"
+                    
+                return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text
+            except Exception:
+                # If CUDA FFT fails, automatically fall back to CPU NumPy
+                pass
+
+        # --- CPU NUMPY FALLBACK ---
         amps_arr = np.array(self.amp_history, dtype=np.float32)
         phases_arr = np.array(self.phase_history, dtype=np.float32)
-
-        # 1. STATIC ENVIRONMENTAL CLUTTER SUBTRACTION (DC Removal)
-        # Subtract the temporal mean of each subcarrier to eliminate stationary reflections (furniture, walls, etc.)
+        
         amps_detrend = amps_arr - np.mean(amps_arr, axis=0)
         phases_detrend = phases_arr - np.mean(phases_arr, axis=0)
-
-        # 2. SPECTRAL ESTIMATION VIA FFT
-        # We will run rfft (real-input fast Fourier transform) along the time axis
+        
         F_phases = np.fft.rfft(phases_detrend, axis=0)
         freqs = np.fft.rfftfreq(self.window_len, d=1.0/self.fs)
-
-        # 3. DEFINE VITAL SIGNS FREQUENCY BANDS
-        # Breathing: 0.12Hz - 0.40Hz (7.2 to 24 BrPM)
-        # Heartbeat: 0.80Hz - 2.10Hz (48 to 126 BPM)
-        breath_band_mask = (freqs >= 0.12) & (freqs <= 0.40)
-        heart_band_mask = (freqs >= 0.80) & (freqs <= 2.10)
-
-        # 4. DYNAMIC SUBCARRIER SELECTION (DSS)
-        # For both breathing and heart rate, select the subcarrier that has the maximum peak power 
-        # in the respective band to combat multi-path fading/nulling.
-        F_phases_abs = np.abs(F_phases) # (freqs_len, subcarriers)
-
-        # Breathing Subcarrier Selection
-        breath_power = np.sum(F_phases_abs[breath_band_mask, :], axis=0)
+        
+        breath_mask = (freqs >= 0.12) & (freqs <= 0.40)
+        heart_mask = (freqs >= 0.80) & (freqs <= 2.10)
+        
+        F_phases_abs = np.abs(F_phases)
+        
+        breath_power = np.sum(F_phases_abs[breath_mask, :], axis=0)
         best_breath_idx = int(np.argmax(breath_power))
         
-        # Heartbeat Subcarrier Selection
-        heart_power = np.sum(F_phases_abs[heart_band_mask, :], axis=0)
+        heart_power = np.sum(F_phases_abs[heart_mask, :], axis=0)
         best_heart_idx = int(np.argmax(heart_power))
-
-        # Extract the signals of the best subcarriers
+        
         breath_fft = F_phases[:, best_breath_idx].copy()
         heart_fft = F_phases[:, best_heart_idx].copy()
-
-        # 5. FFT BRICK-WALL BANDPASS FILTERING (Zeroing out of band frequencies)
-        breath_filtered_fft = np.zeros_like(breath_fft)
-        breath_filtered_fft[breath_band_mask] = breath_fft[breath_band_mask]
         
-        heart_filtered_fft = np.zeros_like(heart_fft)
-        heart_filtered_fft[heart_band_mask] = heart_fft[heart_band_mask]
-
-        # Convert back to time domain
-        self.filtered_breath_wave = np.fft.irfft(breath_filtered_fft, n=self.window_len)
-        self.filtered_heart_wave = np.fft.irfft(heart_filtered_fft, n=self.window_len)
-
-        # Normalize waveforms to range [-1.0, 1.0] for Pygame visual scale
-        norm_factor_b = np.max(np.abs(self.filtered_breath_wave))
-        if norm_factor_b > 1e-5:
-            self.filtered_breath_wave /= norm_factor_b
+        breath_filt_fft = np.zeros_like(breath_fft)
+        breath_filt_fft[breath_mask] = breath_fft[breath_mask]
+        
+        heart_filt_fft = np.zeros_like(heart_fft)
+        heart_filt_fft[heart_mask] = heart_fft[heart_mask]
+        
+        self.filtered_breath_wave = np.fft.irfft(breath_filt_fft, n=self.window_len)
+        self.filtered_heart_wave = np.fft.irfft(heart_filt_fft, n=self.window_len)
+        
+        max_b = np.max(np.abs(self.filtered_breath_wave))
+        if max_b > 1e-5:
+            self.filtered_breath_wave /= max_b
+        max_h = np.max(np.abs(self.filtered_heart_wave))
+        if max_h > 1e-5:
+            self.filtered_heart_wave /= max_h
             
-        norm_factor_h = np.max(np.abs(self.filtered_heart_wave))
-        if norm_factor_h > 1e-5:
-            self.filtered_heart_wave /= norm_factor_h
-
-        # 6. ESTIMATE RADAR HEART RATE & BREATHING RATE (BPM / BrPM)
-        # Find peak index in the breathing band
-        breath_spectrum = np.abs(breath_filtered_fft)
+        breath_spectrum = np.abs(breath_filt_fft)
         breath_peak_idx = np.argmax(breath_spectrum)
-        est_breath_freq = freqs[breath_peak_idx]
-        raw_brpm = est_breath_freq * 60.0
-
-        # Find peak index in the heartbeat band
-        heart_spectrum = np.abs(heart_filtered_fft)
+        raw_brpm = freqs[breath_peak_idx] * 60.0
+        
+        heart_spectrum = np.abs(heart_filt_fft)
         heart_peak_idx = np.argmax(heart_spectrum)
-        est_heart_freq = freqs[heart_peak_idx]
-        raw_bpm = est_heart_freq * 60.0
-
-        # Apply robust Exponential Moving Average (EMA) to combat random frequency noise hops
+        raw_bpm = freqs[heart_peak_idx] * 60.0
+        
         if 48.0 <= raw_bpm <= 126.0:
             self.current_bpm += (raw_bpm - self.current_bpm) * self.bpm_ema_alpha
         if 7.0 <= raw_brpm <= 24.0:
             self.current_brpm += (raw_brpm - self.current_brpm) * self.brpm_ema_alpha
-
-        # Analyze medical conditions for HUD display
-        if self.current_bpm < 60.0:
-            self.status_text = "Resting (Bradycardia)"
-        elif self.current_bpm > 100.0:
-            self.status_text = "Elevated Heart Rate"
-        else:
-            self.status_text = "Stable Tracking"
-
-        # Check for potential sleep apnea (loss of breathing signal over 5s)
+            
         if np.var(amps_detrend[:, best_breath_idx]) < 0.01:
             self.status_text = "⚠️ WARNING: Apnea Alert!"
-
+            
         return self.current_bpm, self.current_brpm, self.filtered_heart_wave, self.filtered_breath_wave, self.status_text

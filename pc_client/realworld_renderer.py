@@ -102,6 +102,19 @@ class RealWorldRenderer:
         self.target_coords = (0.5, 0.5)
         self.smooth_coords = [0.5, 0.5] # for easing animations
         
+        # Smooth coordinates dictionary for multi-target tracking
+        self.target_smoothers = {
+            "USER A (COUCH)": [0.28, 0.35],
+            "USER B (TV ZONE)": [0.72, 0.72],
+            "USER C (CENTER)": [0.50, 0.50]
+        }
+        # Step phase offsets for independent bone animations
+        self.target_swing_phases = {
+            "USER A (COUCH)": 0.0,
+            "USER B (TV ZONE)": 2.0,
+            "USER C (CENTER)": 4.0
+        }
+        
         # Spectrogram history queue
         self.spectrogram_history_len = 100
         self.spectrogram_matrix = np.zeros((self.spectrogram_history_len, self.num_subcarriers))
@@ -315,6 +328,22 @@ class RealWorldRenderer:
         self.smooth_coords[0] += (self.target_coords[0] - self.smooth_coords[0]) * 0.08
         self.smooth_coords[1] += (self.target_coords[1] - self.smooth_coords[1]) * 0.08
         
+        # Smooth multi-target coordinates and update swing phases
+        for target in self.ai_model.active_targets:
+            name = target["name"]
+            tx, ty = target["x"], target["y"]
+            state = target["state_code"]
+            
+            if name not in self.target_smoothers:
+                self.target_smoothers[name] = [tx, ty]
+                self.target_swing_phases[name] = 0.0
+                
+            self.target_smoothers[name][0] += (tx - self.target_smoothers[name][0]) * 0.08
+            self.target_smoothers[name][1] += (ty - self.target_smoothers[name][1]) * 0.08
+            
+            if state == 2:
+                self.target_swing_phases[name] += 0.15
+        
         # Broadcast via UDP JSON/OSC for external 3D game engines (Unity / Unreal Engine 5)
         if self.udp_broadcast_enabled:
             try:
@@ -372,12 +401,20 @@ class RealWorldRenderer:
         pygame.draw.rect(self.screen, self.colors["cyan"], (320 - 15, 260 - 4, 15, 4))
         pygame.draw.rect(self.screen, self.colors["cyan"], (320 - 4, 260 - 15, 4, 15))
         
+        # --- RETRIEVE ACTIVE TARGETS FOR HUD CYCLING ---
+        active_count = len(self.ai_model.active_targets)
+        if active_count > 0:
+            cycle_idx = (self.frame_count // 120) % active_count # cycles every 4 seconds at 30FPS
+            cur_t = self.ai_model.active_targets[cycle_idx]
+            target_name = cur_t["name"]
+            bpm, brpm, h_wave, b_wave, status_text = cur_t["vitals"]
+        else:
+            target_name = "MONITOR CORE"
+            bpm, brpm, h_wave, b_wave, status_text = self.ai_model.latest_vitals
+
         # HUD Header
-        hud_title = self.fonts["header"].render("💓 RADAR VITAL MONITOR", True, self.colors["cyan"])
+        hud_title = self.fonts["header"].render(f"💓 RADAR VITAL - {target_name}", True, self.colors["cyan"])
         self.screen.blit(hud_title, (45, 85))
-        
-        # Retrieve latest vitals
-        bpm, brpm, h_wave, b_wave, status_text = self.ai_model.latest_vitals
         
         # Pulse animation sync with computed BPM
         pulse_angle = self.frame_count * bpm * math.pi / 1800.0
@@ -560,11 +597,18 @@ class RealWorldRenderer:
                 pygame.draw.lines(self.screen, (*r_wave["color"], alpha), False, pts, width=1)
 
         # --- DRAW GRAPHICAL SKELETON AVATAR (REAL-WORLD DIGITAL TWIN TARGET) ---
-        if self.current_state_code > 0:
-            hx, hy = self.smooth_coords[0], self.smooth_coords[1]
+        targets_to_draw = []
+        if len(self.ai_model.active_targets) > 0:
+            for t in self.ai_model.active_targets:
+                name = t["name"]
+                sc = self.target_smoothers.get(name, [t["x"], t["y"]])
+                targets_to_draw.append((name, sc[0], sc[1], t["state_code"]))
+        elif self.current_state_code > 0:
+            targets_to_draw.append(("HOLOGRAPHIC USER", self.smooth_coords[0], self.smooth_coords[1], self.current_state_code))
             
+        for name, hx, hy, s_code in targets_to_draw:
             # Draw Projected 3D Laser Tracker Target Ring on Floor (z = 0)
-            floor_theme = self.colors["orange"] if self.current_state_code == 1 else self.colors["red"]
+            floor_theme = self.colors["orange"] if s_code == 1 else self.colors["red"]
             ring_steps = 12
             ring_pts = []
             for s in range(ring_steps):
@@ -585,11 +629,11 @@ class RealWorldRenderer:
             pygame.draw.line(self.screen, floor_theme, pt_top, pt_bottom, 1)
             
             # Breathing expansion factor (0.95 to 1.05) using sine loop
-            pulse_rate = 0.1 if self.current_state_code == 1 else 0.25
+            pulse_rate = 0.1 if s_code == 1 else 0.25
             pulse_scale = 1.0 + 0.05 * math.sin(self.frame_count * pulse_rate)
             
-            # Walk joint offset using frame count
-            walk_swing = math.sin(self.frame_count * 0.15) if self.current_state_code == 2 else 0.0
+            # Walk joint offset using swing phase
+            walk_swing = math.sin(self.target_swing_phases.get(name, self.frame_count * 0.15)) if s_code == 2 else 0.0
             
             # Base skeletal height map
             sh_torso = 60
@@ -608,7 +652,7 @@ class RealWorldRenderer:
             joint_foot_r = self._to_iso(hx + 0.05, hy - 0.05 - 0.06 * walk_swing, 0)
             
             # 1. Torso/Body Glow Layer
-            theme_color = self.colors["orange"] if self.current_state_code == 1 else self.colors["red"]
+            theme_color = self.colors["orange"] if s_code == 1 else self.colors["red"]
             pygame.draw.circle(self.screen, (*theme_color, 40), joint_neck, 25) # holographic head/torso field
             
             # 2. Draw Skeletal bones
@@ -631,11 +675,11 @@ class RealWorldRenderer:
             pygame.draw.circle(self.screen, self.colors["text"], joint_foot_r, 3)
             
             # Label overlay above character
-            lbl_user = self.fonts["mono"].render(f"HOLOGRAPHIC USER ({hx:.2f}, {hy:.2f})", True, theme_color)
+            lbl_user = self.fonts["mono"].render(f"{name} ({hx:.2f}, {hy:.2f})", True, theme_color)
             self.screen.blit(lbl_user, (joint_head[0] - 80, joint_head[1] - 30))
             
             # Multipath wave scatter collision particles for major motion walking
-            if self.current_state_code == 2 and self.frame_count % 3 == 0:
+            if s_code == 2 and self.frame_count % 3 == 0:
                 for _ in range(4):
                     self.particles.append({
                         "x": hx + (np.random.rand() - 0.5) * 0.12,
@@ -647,7 +691,8 @@ class RealWorldRenderer:
                         "life": 1.0,
                         "color": self.colors["red"]
                     })
-        else:
+                    
+        if len(targets_to_draw) == 0:
             # Empty baseline scan line between RX and TX
             pygame.draw.line(self.screen, (*self.colors["green"], 35), tx_pos, rx_pos, 1)
 
@@ -716,25 +761,40 @@ class RealWorldRenderer:
         pygame.draw.circle(self.screen, self.colors["cyan"], tx_rad, 3)
         pygame.draw.circle(self.screen, self.colors["purple"], rx_rad, 3)
         
-        # Plot target pointer
-        hx, hy = self.smooth_coords[0], self.smooth_coords[1]
-        tx_x, tx_y = to_radar_coords(hx, hy)
-        
-        if self.current_state_code > 0:
-            target_color = self.colors["orange"] if self.current_state_code == 1 else self.colors["red"]
-            p_radius = 5 + int(4 * (1.0 + math.sin(self.frame_count * 0.25)))
-            pygame.draw.circle(self.screen, target_color, (tx_x, tx_y), p_radius, width=1)
-            pygame.draw.circle(self.screen, self.colors["text"], (tx_x, tx_y), 3)
+        # Plot target pointers on radar minimap
+        radar_targets = []
+        if len(self.ai_model.active_targets) > 0:
+            for t in self.ai_model.active_targets:
+                name = t["name"]
+                sc = self.target_smoothers.get(name, [t["x"], t["y"]])
+                radar_targets.append((name, sc[0], sc[1], t["state_code"]))
+        elif self.current_state_code > 0:
+            radar_targets.append(("HOLOGRAPHIC USER", self.smooth_coords[0], self.smooth_coords[1], self.current_state_code))
             
-            # Position Sector tag
-            if hx < 0.45 and hy < 0.45:
-                tag = "COUCH"
-            elif hx > 0.55 and hy > 0.55:
-                tag = "TV ZONE"
-            else:
-                tag = "CENTER"
-            lbl_tr = self.fonts["mono"].render(f"LOCKED: {tag}", True, target_color)
-            self.screen.blit(lbl_tr, (cx - mr, cy - mr - 16))
+        if len(radar_targets) > 0:
+            lbl_y_offset = cy - mr - 16
+            for idx, (name, hx, hy, s_code) in enumerate(radar_targets):
+                tx_x, tx_y = to_radar_coords(hx, hy)
+                target_color = self.colors["orange"] if s_code == 1 else self.colors["red"]
+                p_radius = 5 + int(4 * (1.0 + math.sin((self.frame_count + idx * 10) * 0.25)))
+                
+                # Draw locking radar sweep circle
+                pygame.draw.circle(self.screen, target_color, (tx_x, tx_y), p_radius, width=1)
+                pygame.draw.circle(self.screen, self.colors["text"], (tx_x, tx_y), 3)
+                
+                # Plot sector tag text
+                if hx < 0.45 and hy < 0.45:
+                    tag = "COUCH"
+                elif hx > 0.55 and hy > 0.55:
+                    tag = "TV ZONE"
+                else:
+                    tag = "CENTER"
+                    
+                # Show up to 2 target lock logs on radar to keep it clean
+                if idx < 2:
+                    lbl_tr = self.fonts["mono"].render(f"LOCKED: {tag}", True, target_color)
+                    self.screen.blit(lbl_tr, (cx - mr, lbl_y_offset))
+                    lbl_y_offset += 12
         else:
             pygame.draw.circle(self.screen, self.colors["green"], to_radar_coords(0.5, 0.5), 3)
             

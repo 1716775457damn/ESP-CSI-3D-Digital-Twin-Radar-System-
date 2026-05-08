@@ -737,8 +737,10 @@ class RealWorldRenderer:
                     })
                     
         if len(targets_to_draw) == 0:
-            # Empty baseline scan line between RX and TX
-            pygame.draw.line(self.screen, (*self.colors["green"], 35), tx_pos, rx_pos, 1)
+            # Empty baseline scan line between Router TX and ESP32 CORE
+            line_tx = self._to_iso(0.08, 0.5, 20)
+            line_rx = self._to_iso(0.5, 0.5, 45)
+            pygame.draw.line(self.screen, (*self.colors["green"], 35), line_tx, line_rx, 1)
 
         # Draw and animate particles
         for p in self.particles[:]:

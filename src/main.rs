@@ -50,6 +50,10 @@ static LAST_SENT_TIME: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI
 static mut TARGET_BSSID: [u8; 6] = [0; 6];
 static mut BSSID_LOCKED: bool = false;
 
+// --- ATOMIC UDP TELEMETRY CLIENT STORAGE ---
+static TARGET_CLIENT_ADDR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static TARGET_CLIENT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
 unsafe extern "C" fn csi_rx_cb(ctx: *mut core::ffi::c_void, info: *mut wifi_csi_info_t) {
     if info.is_null() || ctx.is_null() {
         return;
@@ -250,6 +254,32 @@ fn main() -> Result<()> {
         return Err(anyhow::anyhow!("Failed to connect to any configured Wi-Fi networks."));
     }
 
+    // --- UDP STREAMING SOCKET SETUP & CLIENT HANDSHAKE TRACKER ---
+    let udp_socket = std::net::UdpSocket::bind("0.0.0.0:5005")?;
+    let udp_socket_recv = udp_socket.try_clone()?;
+    let udp_socket_send = udp_socket.try_clone()?;
+
+    // Spawn a background UDP listener thread to auto-register/update the streaming destination address
+    std::thread::spawn(move || {
+        let mut rx_buf = [0u8; 32];
+        log::info!("UDP Telemetry Handshake Listener thread started on port 5005.");
+        loop {
+            match udp_socket_recv.recv_from(&mut rx_buf) {
+                Ok((_len, src_addr)) => {
+                    if let std::net::SocketAddr::V4(addr) = src_addr {
+                        let ip_u32 = u32::from(*addr.ip());
+                        TARGET_CLIENT_ADDR.store(ip_u32, std::sync::atomic::Ordering::Relaxed);
+                        TARGET_CLIENT_PORT.store(addr.port(), std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                Err(e) => {
+                    log::error!("UDP receive error: {:?}", e);
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        }
+    });
+
     // --- CHANNEL-BASED SIGNAL PIPELINE ---
     // Use pre-allocated sync_channel of bounded capacity 32. 
     // This pre-allocates queue slots on setup, guaranteeing absolutely zero runtime heap allocations!
@@ -262,6 +292,7 @@ fn main() -> Result<()> {
     let shared_analysis = shared_state.clone();
     std::thread::spawn(move || {
         log::info!("Background CSI Analysis pipeline thread started.");
+        let udp_sender = udp_socket_send;
         
         let mut window = Vec::new();
         let window_size = 50; // Rolling window of 50 samples (~2.5s at 20Hz)
@@ -328,6 +359,34 @@ fn main() -> Result<()> {
                 s.packet_count += 1;
                 s.subcarriers = subcarriers_amp;
                 s.subcarriers_phase = subcarriers_phase;
+
+                // Ultra-low latency raw UDP binary packet streaming
+                let ip_u32 = TARGET_CLIENT_ADDR.load(std::sync::atomic::Ordering::Relaxed);
+                let port = TARGET_CLIENT_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                if ip_u32 != 0 && port != 0 {
+                    let mut bin_buf = [0u8; 537];
+                    bin_buf[0..8].copy_from_slice(&s.timestamp.to_le_bytes());
+                    bin_buf[8..12].copy_from_slice(&s.amplitude.to_le_bytes());
+                    bin_buf[12..16].copy_from_slice(&s.variance.to_le_bytes());
+                    bin_buf[16] = s.status_code;
+                    bin_buf[17..25].copy_from_slice(&s.packet_count.to_le_bytes());
+                    
+                    let sub_count = s.subcarriers.len().min(64);
+                    for i in 0..sub_count {
+                        bin_buf[25 + i*4 .. 25 + (i+1)*4].copy_from_slice(&s.subcarriers[i].to_le_bytes());
+                    }
+                    
+                    let phase_count = s.subcarriers_phase.len().min(64);
+                    for i in 0..phase_count {
+                        bin_buf[281 + i*4 .. 281 + (i+1)*4].copy_from_slice(&s.subcarriers_phase[i].to_le_bytes());
+                    }
+
+                    let dest_addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                        std::net::Ipv4Addr::from(ip_u32),
+                        port,
+                    ));
+                    let _ = udp_sender.send_to(&bin_buf, dest_addr);
+                }
             }
         }
     });

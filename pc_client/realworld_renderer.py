@@ -137,88 +137,62 @@ class RealWorldRenderer:
         self.calib_progress = 0
         self.calib_max_samples = 120 # ~6 seconds at 20Hz
         
-        # Start background listener thread
-        self.ws_thread = threading.Thread(target=self._websocket_listener, daemon=True)
-        self.ws_thread.start()
+        # Start background UDP stream listener thread
+        self.connected = False
+        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_sock.bind(("0.0.0.0", 0)) # bind dynamically to a free local port
+        self.udp_sock.settimeout(1.0)
+        
+        self.udp_thread = threading.Thread(target=self._udp_stream_listener, daemon=True)
+        self.udp_thread.start()
         
         # Start background Active Sounding Prober to force high-frequency CSI sniffer firing
+        # This also acts as the UDP handshake registration packet
         self.prober_thread = threading.Thread(target=self._active_sounding_prober, daemon=True)
         self.prober_thread.start()
 
-    def _websocket_listener(self):
+    def _udp_stream_listener(self):
         """
-        Background listener to pull real-time CSI JSON streams via WebSockets.
+        Background listener to pull real-time CSI binary streams via ultra-low latency raw UDP.
         """
-        import websocket
+        import struct
+        print(f"[UDP Stream] Bound dynamically on local port {self.udp_sock.getsockname()[1]}")
+        
         while True:
             try:
-                print(f"[WS Connection] Connecting to {self.ws_url}...")
-                ws = websocket.WebSocket()
-                ws.connect(self.ws_url)
+                data, addr = self.udp_sock.recvfrom(1024)
                 self.connected = True
-                print("[WS Connection] Established successfully.")
                 
-                # Request Loop at 30Hz
-                while True:
-                    ws.send("bin")
-                    response = ws.recv()
+                if len(data) == 537:
+                    unpacked = struct.unpack("<QffBQ128f", data)
                     
-                    # Optimized Binary Parser (if exactly 537 bytes)
-                    if isinstance(response, bytes) and len(response) == 537:
-                        import struct
-                        # Unpack format:
-                        # < : little-endian
-                        # Q : uint64 timestamp
-                        # f : float amplitude
-                        # f : float variance
-                        # B : uint8 status_code
-                        # Q : uint64 packet_count
-                        # 128f : 128 floats (64 subcarriers + 64 phases)
-                        unpacked = struct.unpack("<QffBQ128f", response)
-                        
-                        self.latest_metrics["amplitude"] = unpacked[1]
-                        self.latest_metrics["variance"] = unpacked[2]
-                        self.latest_metrics["packet_count"] = unpacked[4]
-                        
-                        # Extract subcarriers lists
-                        self.latest_metrics["subcarriers"] = list(unpacked[5:69])
-                        self.latest_metrics["subcarriers_phase"] = list(unpacked[69:133])
-                    else:
-                        # Fallback JSON Parser (keeps compatibility with browser or older endpoints)
-                        if isinstance(response, bytes):
-                            response = response.decode('utf-8', errors='ignore')
-                        data = json.loads(response)
-                        self.latest_metrics["amplitude"] = data.get("amplitude", 0.0)
-                        self.latest_metrics["variance"] = data.get("variance", 0.0)
-                        self.latest_metrics["packet_count"] = data.get("packet_count", 0)
-                        
-                        subcarriers = data.get("subcarriers", [])
-                        if len(subcarriers) > 0:
-                            self.latest_metrics["subcarriers"] = subcarriers
-                            
-                        phases = data.get("subcarriers_phase", [])
-                        if len(phases) > 0:
-                            self.latest_metrics["subcarriers_phase"] = phases
+                    self.latest_metrics["amplitude"] = unpacked[1]
+                    self.latest_metrics["variance"] = unpacked[2]
+                    self.latest_metrics["packet_count"] = unpacked[4]
                     
-                    # Throttling
-                    time.sleep(0.033)
-                    
+                    # Extract subcarriers lists
+                    self.latest_metrics["subcarriers"] = list(unpacked[5:69])
+                    self.latest_metrics["subcarriers_phase"] = list(unpacked[69:133])
+            except socket.timeout:
+                self.connected = False
+                continue
             except Exception as e:
                 self.connected = False
-                print(f"[WS Connection] Lost connection: {e}. Retrying in 3 seconds...")
-                time.sleep(3.0)
+                print(f"[UDP Stream] Socket Error: {e}")
+                time.sleep(1.0)
 
     def _active_sounding_prober(self):
         """
-        Sends high-frequency UDP probing packets to ESP32 IP to trigger continuous Wi-Fi radio 
-        exchanges. This boosts the sniffer sampling rate from 5Hz AP beacons to a solid, stable 30Hz.
+        Sends high-frequency UDP probing packets to ESP32 IP on port 5005.
+        This triggers continuous Wi-Fi radio exchanges on the ESP32, while also acting as
+        the active UDP stream handshake, registering this client's IP and port.
         """
-        probe_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        dummy_data = b"\x00" * 12
+        dummy_data = b"csi_handshake"
         while True:
-            if hasattr(self, "ip_address") and self.ip_address:
+            if hasattr(self, "ip_address") and self.ip_address and hasattr(self, "udp_sock"):
                 try:
-                    probe_socket.sendto(dummy_data, (self.ip_address, 80))
+                    # Send UDP handshake to ESP32 port 5005 using the bound receiver socket
+                    self.udp_sock.sendto(dummy_data, (self.ip_address, 5005))
                 except Exception:
                     pass
             time.sleep(0.02) # ~50Hz probing rate to guarantee 30Hz saturated CSI

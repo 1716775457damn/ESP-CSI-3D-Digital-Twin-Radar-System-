@@ -413,15 +413,39 @@ fn main() -> Result<()> {
         };
 
         if len > 0 {
-            ws.recv(buf.as_mut())?;
+            let (_ft, received_len) = ws.recv(buf.as_mut())?;
+            let req_str = std::str::from_utf8(&buf[..received_len]).unwrap_or("").trim();
             
-            // Format metrics into a JSON frame
-            let reply = {
-                let metrics = shared_ws.read().unwrap();
-                serde_json::to_string(&*metrics).unwrap()
-            };
-
-            ws.send(FrameType::Text(false), reply.as_bytes())?;
+            if req_str == "bin" {
+                // Hyper-optimized binary serialization: 0% JSON formatting overhead, 537-byte tiny packet
+                let mut bin_buf = [0u8; 537];
+                {
+                    let s = shared_ws.read().unwrap();
+                    bin_buf[0..8].copy_from_slice(&s.timestamp.to_le_bytes());
+                    bin_buf[8..12].copy_from_slice(&s.amplitude.to_le_bytes());
+                    bin_buf[12..16].copy_from_slice(&s.variance.to_le_bytes());
+                    bin_buf[16] = s.status_code;
+                    bin_buf[17..25].copy_from_slice(&s.packet_count.to_le_bytes());
+                    
+                    let sub_count = s.subcarriers.len().min(64);
+                    for i in 0..sub_count {
+                        bin_buf[25 + i*4 .. 25 + (i+1)*4].copy_from_slice(&s.subcarriers[i].to_le_bytes());
+                    }
+                    
+                    let phase_count = s.subcarriers_phase.len().min(64);
+                    for i in 0..phase_count {
+                        bin_buf[281 + i*4 .. 281 + (i+1)*4].copy_from_slice(&s.subcarriers_phase[i].to_le_bytes());
+                    }
+                }
+                ws.send(FrameType::Binary(false), &bin_buf)?;
+            } else {
+                // Legacy JSON string serialization (keeps full compatibility with browser dashboard)
+                let reply = {
+                    let metrics = shared_ws.read().unwrap();
+                    serde_json::to_string(&*metrics).unwrap()
+                };
+                ws.send(FrameType::Text(false), reply.as_bytes())?;
+            }
         }
 
         Ok::<(), esp_idf_svc::sys::EspError>(())

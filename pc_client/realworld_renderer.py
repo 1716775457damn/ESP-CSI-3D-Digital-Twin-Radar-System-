@@ -160,22 +160,45 @@ class RealWorldRenderer:
                 
                 # Request Loop at 30Hz
                 while True:
-                    ws.send("get")
+                    ws.send("bin")
                     response = ws.recv()
-                    data = json.loads(response)
                     
-                    # Store latest data
-                    self.latest_metrics["amplitude"] = data.get("amplitude", 0.0)
-                    self.latest_metrics["variance"] = data.get("variance", 0.0)
-                    self.latest_metrics["packet_count"] = data.get("packet_count", 0)
-                    
-                    subcarriers = data.get("subcarriers", [])
-                    if len(subcarriers) > 0:
-                        self.latest_metrics["subcarriers"] = subcarriers
+                    # Optimized Binary Parser (if exactly 537 bytes)
+                    if isinstance(response, bytes) and len(response) == 537:
+                        import struct
+                        # Unpack format:
+                        # < : little-endian
+                        # Q : uint64 timestamp
+                        # f : float amplitude
+                        # f : float variance
+                        # B : uint8 status_code
+                        # Q : uint64 packet_count
+                        # 128f : 128 floats (64 subcarriers + 64 phases)
+                        unpacked = struct.unpack("<QffBQ128f", response)
                         
-                    phases = data.get("subcarriers_phase", [])
-                    if len(phases) > 0:
-                        self.latest_metrics["subcarriers_phase"] = phases
+                        self.latest_metrics["amplitude"] = unpacked[1]
+                        self.latest_metrics["variance"] = unpacked[2]
+                        self.latest_metrics["packet_count"] = unpacked[4]
+                        
+                        # Extract subcarriers lists
+                        self.latest_metrics["subcarriers"] = list(unpacked[5:69])
+                        self.latest_metrics["subcarriers_phase"] = list(unpacked[69:133])
+                    else:
+                        # Fallback JSON Parser (keeps compatibility with browser or older endpoints)
+                        if isinstance(response, bytes):
+                            response = response.decode('utf-8', errors='ignore')
+                        data = json.loads(response)
+                        self.latest_metrics["amplitude"] = data.get("amplitude", 0.0)
+                        self.latest_metrics["variance"] = data.get("variance", 0.0)
+                        self.latest_metrics["packet_count"] = data.get("packet_count", 0)
+                        
+                        subcarriers = data.get("subcarriers", [])
+                        if len(subcarriers) > 0:
+                            self.latest_metrics["subcarriers"] = subcarriers
+                            
+                        phases = data.get("subcarriers_phase", [])
+                        if len(phases) > 0:
+                            self.latest_metrics["subcarriers_phase"] = phases
                     
                     # Throttling
                     time.sleep(0.033)

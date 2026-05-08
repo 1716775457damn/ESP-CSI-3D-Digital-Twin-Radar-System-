@@ -104,15 +104,15 @@ class RealWorldRenderer:
         
         # Smooth coordinates dictionary for multi-target tracking
         self.target_smoothers = {
-            "USER A (COUCH)": [0.28, 0.35],
-            "USER B (TV ZONE)": [0.72, 0.72],
-            "USER C (CENTER)": [0.50, 0.50]
+            "TARGET SUB-A": [0.20, 0.50],
+            "TARGET SUB-C": [0.80, 0.50],
+            "TARGET SUB-B": [0.50, 0.50]
         }
         # Step phase offsets for independent bone animations
         self.target_swing_phases = {
-            "USER A (COUCH)": 0.0,
-            "USER B (TV ZONE)": 2.0,
-            "USER C (CENTER)": 4.0
+            "TARGET SUB-A": 0.0,
+            "TARGET SUB-C": 2.0,
+            "TARGET SUB-B": 4.0
         }
         
         # Spectrogram history queue
@@ -130,7 +130,7 @@ class RealWorldRenderer:
         self.frame_count = 0
         
         # Calibration State Machine
-        self.calibration_state = 0 # 0=Normal, 1=Couch pre-rec, 2=Couch rec active, 3=TV pre-rec, ...
+        self.calibration_state = 0 # 0=Normal, 1=SubA pre-rec, 2=SubA active, 3=SubC pre-rec, ...
         self.calib_samples_x = []
         self.calib_samples_y_class = []
         self.calib_samples_y_coord = []
@@ -317,13 +317,13 @@ class RealWorldRenderer:
                     self.calib_samples_x.append(seq_data)
                     
                     # Labels and coords based on calibration step
-                    if self.calibration_state == 2: # Couch Zone
+                    if self.calibration_state == 2: # Sub-space A
                         self.calib_samples_y_class.append(1)
-                        self.calib_samples_y_coord.append([0.25, 0.35])
-                    elif self.calibration_state == 4: # TV Zone
+                        self.calib_samples_y_coord.append([0.20, 0.50])
+                    elif self.calibration_state == 4: # Sub-space C
                         self.calib_samples_y_class.append(2)
-                        self.calib_samples_y_coord.append([0.75, 0.65])
-                    elif self.calibration_state == 6: # Center
+                        self.calib_samples_y_coord.append([0.80, 0.50])
+                    elif self.calibration_state == 6: # Sub-space B
                         self.calib_samples_y_class.append(2)
                         self.calib_samples_y_coord.append([0.5, 0.5])
                     elif self.calibration_state == 8: # Vacant
@@ -509,25 +509,54 @@ class RealWorldRenderer:
             if len(b_pts) > 1:
                 pygame.draw.lines(self.screen, self.colors["cyan"], False, b_pts, width=1)
                 
-        # Draw isometric room floor tiles (realistic wooden floor texture)
-        grid_res = 12
+        # --- DRAW REAL-TIME CSI PHYSICAL SIGNAL LANDSCAPE (8x8 3D Grid) ---
+        grid_res = 8
+        subcarriers = self.latest_metrics["subcarriers"]
+        subcarriers_phase = self.latest_metrics["subcarriers_phase"]
+        max_sub = max(subcarriers) if len(subcarriers) > 0 and max(subcarriers) > 0 else 1.0
+        
         for i in range(grid_res):
             for j in range(grid_res):
+                idx = i * grid_res + j
+                amp_val = subcarriers[idx] if idx < len(subcarriers) else 0.0
+                phase_val = subcarriers_phase[idx] if idx < len(subcarriers) else 0.0
+                
+                # Height driven dynamically by real-time subcarrier amplitude
+                height_val = float((amp_val / max_sub) * 35.0)
+                
+                # Color gradient mapping from cool dark purple/blue to vibrant warm cyan/orange (CSI amplitude)
+                norm_amp = amp_val / max_sub
+                r = int(norm_amp * 139 + (1 - norm_amp) * 15)
+                g = int(norm_amp * 92 + (1 - norm_amp) * 23)
+                b = int(norm_amp * 246 + (1 - norm_amp) * 42)
+                tile_color = (r, g, b)
+                
                 x_val_0 = i / grid_res
                 x_val_1 = (i + 1) / grid_res
                 y_val_0 = j / grid_res
                 y_val_1 = (j + 1) / grid_res
                 
-                pt_a = self._to_iso(x_val_0, y_val_0)
-                pt_b = self._to_iso(x_val_1, y_val_0)
-                pt_c = self._to_iso(x_val_1, y_val_1)
-                pt_d = self._to_iso(x_val_0, y_val_1)
+                pt_a = self._to_iso(x_val_0, y_val_0, height_val)
+                pt_b = self._to_iso(x_val_1, y_val_0, height_val)
+                pt_c = self._to_iso(x_val_1, y_val_1, height_val)
+                pt_d = self._to_iso(x_val_0, y_val_1, height_val)
                 
-                # Checkered floorboard colors for wooden deck texture
-                tile_color = self.colors["wood"] if (i + j) % 2 == 0 else self.colors["wood_light"]
+                pt_a_down = self._to_iso(x_val_0, y_val_0, 0)
+                pt_b_down = self._to_iso(x_val_1, y_val_0, 0)
+                pt_c_down = self._to_iso(x_val_1, y_val_1, 0)
+                pt_d_down = self._to_iso(x_val_0, y_val_1, 0)
+                
+                # Top face of 3D cell column
                 pygame.draw.polygon(self.screen, tile_color, [pt_a, pt_b, pt_c, pt_d])
                 pygame.draw.polygon(self.screen, (20, 15, 12), [pt_a, pt_b, pt_c, pt_d], width=1)
                 
+                # Side face overlays for rich isometric 3D block depth
+                if height_val > 1.5:
+                    side_color_1 = (int(r * 0.7), int(g * 0.7), int(b * 0.7))
+                    side_color_2 = (int(r * 0.55), int(g * 0.55), int(b * 0.55))
+                    pygame.draw.polygon(self.screen, side_color_1, [pt_b, pt_c, pt_c_down, pt_b_down])
+                    pygame.draw.polygon(self.screen, side_color_2, [pt_c, pt_d, pt_d_down, pt_c_down])
+                    
         # Draw Isometric Walls (left wall and right wall)
         wall_h = 100
         wall_l_a = self._to_iso(0, 0)
@@ -544,37 +573,13 @@ class RealWorldRenderer:
         pygame.draw.polygon(self.screen, (25, 33, 52), [wall_r_a, wall_r_b, wall_r_c, wall_r_d])
         pygame.draw.polygon(self.screen, self.colors["border"], [wall_r_a, wall_r_b, wall_r_c, wall_r_d], width=1)
         
-        # RENDER FURNITURE MODELS (using isometric projection)
-        # Couch (located around x=[0.2, 0.4], y=[0.2, 0.6])
-        couch_color = (64, 46, 82)
-        c_p1 = self._to_iso(0.15, 0.2)
-        c_p2 = self._to_iso(0.4, 0.2)
-        c_p3 = self._to_iso(0.4, 0.6)
-        c_p4 = self._to_iso(0.15, 0.6)
-        c_p1_up = self._to_iso(0.15, 0.2, 25)
-        c_p2_up = self._to_iso(0.4, 0.2, 25)
-        c_p3_up = self._to_iso(0.4, 0.6, 25)
-        c_p4_up = self._to_iso(0.15, 0.6, 25)
-        pygame.draw.polygon(self.screen, couch_color, [c_p1, c_p2, c_p3, c_p4])
-        pygame.draw.polygon(self.screen, (84, 61, 107), [c_p1_up, c_p2_up, c_p3_up, c_p4_up])
-        pygame.draw.polygon(self.screen, couch_color, [c_p1, c_p2, c_p2_up, c_p1_up])
-        pygame.draw.polygon(self.screen, couch_color, [c_p2, c_p3, c_p3_up, c_p2_up])
-        pygame.draw.polygon(self.screen, couch_color, [c_p3, c_p4, c_p4_up, c_p3_up])
-        
-        # Flat TV Screen (on the right wall, x=0.9, y=0.4 to 0.7)
-        tv_color = (15, 23, 42)
-        tv_p1 = self._to_iso(0.9, 0.4, 30)
-        tv_p2 = self._to_iso(0.9, 0.7, 30)
-        tv_p3 = self._to_iso(0.9, 0.7, 75)
-        tv_p4 = self._to_iso(0.9, 0.4, 75)
-        pygame.draw.polygon(self.screen, tv_color, [tv_p1, tv_p2, tv_p3, tv_p4])
-        pygame.draw.polygon(self.screen, self.colors["text_muted"], [tv_p1, tv_p2, tv_p3, tv_p4], width=1)
-        
-        # Room Accessories labels
-        lbl_tv = self.fonts["mono"].render("TV", True, self.colors["text_muted"])
-        self.screen.blit(lbl_tv, self._to_iso(0.91, 0.55, 50))
-        lbl_couch = self.fonts["mono"].render("COUCH", True, self.colors["text_muted"])
-        self.screen.blit(lbl_couch, self._to_iso(0.27, 0.4, 30))
+        # Room Subcarrier space divider labels
+        lbl_suba = self.fonts["mono"].render("SUB-SPACE A (0-22)", True, self.colors["text_muted"])
+        self.screen.blit(lbl_suba, self._to_iso(0.18, 0.45, 15))
+        lbl_subb = self.fonts["mono"].render("SUB-SPACE B (22-43)", True, self.colors["text_muted"])
+        self.screen.blit(lbl_subb, self._to_iso(0.50, 0.45, 15))
+        lbl_subc = self.fonts["mono"].render("SUB-SPACE C (43-64)", True, self.colors["text_muted"])
+        self.screen.blit(lbl_subc, self._to_iso(0.82, 0.45, 15))
         
         # --- DRAW COEXISTING ROUTER TX & ESP32 RX NODES ---
         # Router TX (located at bottom wall, x=0, y=0.5)
@@ -769,16 +774,17 @@ class RealWorldRenderer:
             sy = cy + int((ry - 0.5) * 2.0 * (mr - 12))
             return sx, sy
             
-        # Draw Couch and TV area projection on radar scope
-        c_tl = to_radar_coords(0.15, 0.2)
-        c_br = to_radar_coords(0.4, 0.6)
-        couch_rect = pygame.Rect(c_tl[0], c_tl[1], c_br[0] - c_tl[0], c_br[1] - c_tl[1])
-        pygame.draw.rect(self.screen, (34, 25, 48), couch_rect, border_radius=4)
-        pygame.draw.rect(self.screen, (139, 92, 246), couch_rect, width=1, border_radius=4)
-        
-        tv_top = to_radar_coords(0.9, 0.4)
-        tv_bot = to_radar_coords(0.9, 0.7)
-        pygame.draw.line(self.screen, self.colors["cyan"], tv_top, tv_bot, 2)
+        # Draw physical CSI subspace division guides on radar scope
+        for xi, label in [(0.2, "SUB-A"), (0.5, "SUB-B"), (0.8, "SUB-C")]:
+            tx_lbl, ty_lbl = to_radar_coords(xi, 0.15)
+            lbl_g = self.fonts["mono"].render(label, True, self.colors["text_muted"])
+            self.screen.blit(lbl_g, (tx_lbl - 15, ty_lbl))
+            
+        # Draw vertical grid division lines on the radar scope
+        for div_x in [0.33, 0.66]:
+            t_top = to_radar_coords(div_x, 0.05)
+            t_bot = to_radar_coords(div_x, 0.95)
+            pygame.draw.line(self.screen, (30, 41, 59), t_top, t_bot, 1)
         
         # Animate sweeping radar line
         sweep_angle = math.radians(self.frame_count * 2)
@@ -814,12 +820,12 @@ class RealWorldRenderer:
                 pygame.draw.circle(self.screen, self.colors["text"], (tx_x, tx_y), 3)
                 
                 # Plot sector tag text
-                if hx < 0.45 and hy < 0.45:
-                    tag = "COUCH"
-                elif hx > 0.55 and hy > 0.55:
-                    tag = "TV ZONE"
+                if hx < 0.45:
+                    tag = "SUB-A (0-22)"
+                elif hx > 0.55:
+                    tag = "SUB-C (43-64)"
                 else:
-                    tag = "CENTER"
+                    tag = "SUB-B (22-43)"
                     
                 # Show up to 2 target lock logs on radar to keep it clean
                 if idx < 2:
@@ -859,16 +865,12 @@ class RealWorldRenderer:
         if self.current_state_code == 0:
             region_name = "VACANT"
         else:
-            if hx < 0.45 and hy < 0.45:
-                region_name = "Couch Zone (SE)"
-            elif hx > 0.55 and hy < 0.45:
-                region_name = "East Entrance"
-            elif hx > 0.55 and hy > 0.55:
-                region_name = "TV Cabinet (NW)"
-            elif hx < 0.45 and hy > 0.55:
-                region_name = "West Window"
+            if hx < 0.33:
+                region_name = "Sub-space A (0-22)"
+            elif hx > 0.66:
+                region_name = "Sub-space C (43-64)"
             else:
-                region_name = "Room Center"
+                region_name = "Sub-space B (22-43)"
 
         # Display Left Half: Activity Classification
         act_lbl = self.fonts["mono"].render("CLASSIFIED ACTIVITY", True, self.colors["text_muted"])
@@ -1024,14 +1026,14 @@ class RealWorldRenderer:
         
         # Step mappings
         steps = {
-            1: ("Step 1/4: COUCH ZONE Calibration", "Please walk to or sit on the COUCH (SE). Make natural static or small movements.\n\nPress [SPACE] to start recording 120 calibration frames."),
-            2: ("Step 1/4: COUCH ZONE [RECORDING ACTIVE]", "Recording... Please maintain natural posture/movement around the Couch.\n\nDo not walk away until progress reaches 100%."),
-            3: ("Step 2/4: TV ZONE Calibration", "Please stand or walk around the TV CABINET area (NW).\n\nPress [SPACE] to start recording 120 calibration frames."),
-            4: ("Step 2/4: TV ZONE [RECORDING ACTIVE]", "Recording... Please maintain natural posture/movement around the TV area.\n\nDo not walk away until progress reaches 100%."),
-            5: ("Step 3/4: ROOM CENTER Calibration", "Please walk around the CENTER of the room freely.\n\nPress [SPACE] to start recording 120 calibration frames."),
-            6: ("Step 3/4: ROOM CENTER [RECORDING ACTIVE]", "Recording... Please walk around the room center freely.\n\nDo not stop until progress reaches 100%."),
-            7: ("Step 4/4: VACANT ROOM Calibration", "Please exit the sensing area or sit completely still (No Motion).\n\nPress [SPACE] to start recording 120 calibration frames."),
-            8: ("Step 4/4: VACANT ROOM [RECORDING ACTIVE]", "Recording... Please stay still or keep the room completely vacant.\n\nDo not move until progress reaches 100%."),
+            1: ("Step 1/4: SUB-SPACE A Calibration", "Please move within or interact with SUB-SPACE A (Subcarriers 0-22).\n\nPress [SPACE] to start recording 120 calibration frames."),
+            2: ("Step 1/4: SUB-SPACE A [RECORDING ACTIVE]", "Recording... Please maintain natural posture/movement around Sub-space A.\n\nDo not walk away until progress reaches 100%."),
+            3: ("Step 2/4: SUB-SPACE C Calibration", "Please move within or interact with SUB-SPACE C (Subcarriers 43-64).\n\nPress [SPACE] to start recording 120 calibration frames."),
+            4: ("Step 2/4: SUB-SPACE C [RECORDING ACTIVE]", "Recording... Please maintain natural posture/movement around Sub-space C.\n\nDo not walk away until progress reaches 100%."),
+            5: ("Step 3/4: SUB-SPACE B Calibration", "Please move within or interact with SUB-SPACE B (Subcarriers 22-43).\n\nPress [SPACE] to start recording 120 calibration frames."),
+            6: ("Step 3/4: SUB-SPACE B [RECORDING ACTIVE]", "Recording... Please maintain natural posture/movement around Sub-space B.\n\nDo not walk away until progress reaches 100%."),
+            7: ("Step 4/4: VACANT ENVIRONMENT Calibration", "Please exit the sensing area or sit completely still (No Motion).\n\nPress [SPACE] to start recording 120 calibration frames."),
+            8: ("Step 4/4: VACANT ENVIRONMENT [RECORDING ACTIVE]", "Recording... Please stay still or keep the environment completely vacant.\n\nDo not move until progress reaches 100%."),
             9: ("🤖 DEEP LEARNING MODEL TRAINING", "Auto-calibration sequences gathered successfully!\n\nPyTorch is now training the Self-Attention BiGRU model\non your CUDA GPU/CPU in the background.\n\nPlease wait a few seconds..."),
             10: ("🎉 CALIBRATION COMPLETE & SUCCESSFUL", "The Self-Attention BiGRU neural networks have been 100% successfully trained and optimized!\n\nWeights are saved to 'csi_weights.pt'.\nNeural coordinate tracking is now fully active!\n\nPress [ENTER] to return to simulation."),
             11: ("❌ CALIBRATION & TRAINING FAILED", "An unexpected error occurred during training or data gathering.\n\nPlease check the terminal log outputs.\n\nPress [ENTER] to exit calibration.")

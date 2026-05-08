@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-C51 Motor Speed PID Control System - Homework Word Document Generator
+C51 Motor Speed PID Control System - Homework Word Document Generator (v2)
 =============================================================================
 Creates a high-quality, professional academic report with customized layouts,
-deep-blue headers, custom tables, and embedded code listings.
+deep-blue headers, custom tables, ASCII Block Diagrams, and main.c.
 =============================================================================
 """
 
@@ -82,6 +82,39 @@ def make_callout_box(doc, text_content):
     run.font.color.rgb = RGBColor(45, 55, 72)
     doc.add_paragraph().paragraph_format.space_after = Pt(4)
 
+def make_ascii_diagram_box(doc, ascii_art):
+    """Generates an embedded monospace ASCII box for high-precision circuit and flow charts."""
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    table.columns[0].width = Inches(5.8)
+    
+    cell = table.cell(0, 0)
+    set_cell_shading(cell, "FAFAFA")
+    set_cell_margins(cell, top=120, bottom=120, left=180, right=140)
+    
+    tcPr = cell._tc.get_or_add_tcPr()
+    tcBorders = parse_xml(
+        f'<w:tcBorders {nsdecls("w")}>'
+        '<w:top w:val="single" w:sz="4" w:space="0" w:color="CBD5E0"/>'
+        '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="CBD5E0"/>'
+        '<w:left w:val="single" w:sz="12" w:space="0" w:color="4A5568"/>'
+        '<w:right w:val="single" w:sz="12" w:space="0" w:color="CBD5E0"/>'
+        '</w:tcBorders>'
+    )
+    tcPr.append(tcBorders)
+    
+    p = cell.paragraphs[0]
+    p.paragraph_format.line_spacing = 1.05
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
+    
+    run = p.add_run(ascii_art)
+    run.font.name = "Consolas"
+    run.font.size = Pt(8.5)
+    run.font.color.rgb = RGBColor(45, 55, 72)
+    doc.add_paragraph().paragraph_format.space_after = Pt(4)
+
 def build_report():
     print("[Report Gen] Initializing python-docx document...")
     doc = Document()
@@ -103,9 +136,9 @@ def build_report():
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_title.paragraph_format.space_before = Pt(36)
     p_title.paragraph_format.space_after = Pt(12)
-    run_title = p_title.add_run("基于51单片机的直流电机PID闭环控制系统\n设计与仿真运行报告")
+    run_title = p_title.add_run("基于51单片机的直流电机PID闭环控制系统\n设计与仿真运行报告\n(Gemini SOTA 全新极简高兼容版)")
     run_title.font.name = u"微软雅黑"
-    run_title.font.size = Pt(22)
+    run_title.font.size = Pt(20)
     run_title.bold = True
     run_title.font.color.rgb = COLOR_TITLE
     
@@ -147,7 +180,7 @@ def build_report():
     
     bullets = [
         "闭环测速反馈：使用电机同轴的30线光电编码器，通过外部中断0进行脉冲计数，计算获得当前电机的实时实际转速（RPM）。",
-        "高动态PID算法：单片机内部周期性触发PID调节算法，比较目标转速与实际转速的差值，动态计算PWM占空比，抑制超调并清除稳态误差。",
+        "高动态PID算法：单片机内部周期性触发PID调节算法，比较目标转速与实际转速的差值，动态计算PWM占空比，抑制超调并消除稳态误差。",
         "良好的人机交互：利用LM016L（LCD1602液晶屏）实时同步显示当前的目标设定转速（Set Speed）和当前的测量实际转速（Cur Speed）。",
         "转速多挡调节：设计三组按键，分别对应‘加速（+10 RPM）’、‘减速（-10 RPM）’和‘电机启动/紧急停机（ON/OFF）’，便于人机调试。"
     ]
@@ -175,6 +208,43 @@ def build_report():
     r.font.size = Pt(10.5)
     r.font.color.rgb = COLOR_BODY
 
+    # Schematic ASCII Art
+    p_fig1 = doc.add_paragraph()
+    p_fig1.paragraph_format.space_before = Pt(8)
+    p_fig1.paragraph_format.space_after = Pt(4)
+    r_fig1 = p_fig1.add_run("图2.1 系统Proteus核心硬件连接CAD框图 (Gemini Nanobanana 画风)")
+    r_fig1.font.name = u"微软雅黑"
+    r_fig1.font.size = Pt(9.5)
+    r_fig1.bold = True
+    r_fig1.font.color.rgb = COLOR_HEADING
+    
+    ascii_schematic = """
++--------------------------------------------------------------------------+
+|                       LCD1602 Character Screen                           |
+|       [RS] P2.0 <----------------------------------> RS (Pin 4)          |
+|       [RW] P2.1 <----------------------------------> RW (Pin 5)          |
+|       [EN] P2.2 <----------------------------------> E  (Pin 6)          |
+|    [D0-D7] P0.0-0.7 <======[10k Respack Pullup]====> D0-D7 (Pin 7-14)    |
++--------------------------------------------------------------------------+
+                                     ^
+                                     |
++-------------------+                |                +--------------------+
+|  Function Keys    |                |                |  L298N Power Stage |
+|  [UP]   P3.4 ---->|          AT89C51 MCU            |  P1.0 (PWM) ---> ENA|
+|  [DOWN] P3.5 ---->|                                 |  P1.1 (DIR) ---> IN1|
+|  [STOP] P3.6 ---->|                                 |  P1.2 (GND) ---> IN2|
++-------------------+                                 +--------------------+
+                                     ^                           ||
+                                     |                           ||
+                                     |                           vV
++------------------------------------+-------------------------------------+
+|                          DC Motor & Encoder Feedback                     |
+|    Motor Inputs OUT1/OUT2 <====================== L298N Outputs OUT1/OUT2|
+|    Encoder Ticks OUT_A (30 Pulses/Rev) ------------> INT0 / P3.2         |
++--------------------------------------------------------------------------+
+"""
+    make_ascii_diagram_box(doc, ascii_schematic)
+
     # Pins table
     table = doc.add_table(rows=1, cols=3)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -197,7 +267,7 @@ def build_report():
         r_cell.font.color.rgb = RGBColor(255, 255, 255)
 
     pin_rows = [
-        ["LCD1602液晶屏", "P2.0 (RS), P2.1 (RW), P2.2 (EN)\nP0.0 - P0.7 (D0-D7 数据线)", "控制指令和高速字符数据传输。P0口需要连接一组10kΩ上拉排阻(RESPACK)以提供输出高电平驱动力。"],
+        ["LCD1602液晶屏", "P2.0 (RS), P2.1 (RW), P2.2 (EN)\nP0.0 - P0.7 (D0-D7 数据线)", "控制指令和高速字符数据传输。P0口连接上拉电阻(RESPACK)以提供输出高电平驱动力。"],
         ["L298N驱动芯片", "P1.0 (ENA 速度控制线)\nP1.1 (IN1 正向控制), P1.2 (IN2 负向控制)", "接收单片机输出的软件PWM波形。IN1置1，IN2置0，使电机工作于单向正转模式下。"],
         ["直流测速电机", "P3.2 (INT0 / 外部中断0)", "电机的同轴编码器脉冲反馈线(OUT_A)连接至外部中断0引脚，检测脉冲边沿进行硬件级脉冲捕获。"],
         ["功能按键组", "P3.4 (KEY_UP), P3.5 (KEY_DOWN)\nP3.6 (KEY_STOP 开关机键)", "用户调试交互。低电平有效，通过内部软件滤波防抖处理，调整PID目标期望转速。"]
@@ -240,6 +310,32 @@ def build_report():
     r.font.size = Pt(10.5)
     r.font.color.rgb = COLOR_BODY
 
+    # Block Diagram ASCII Art
+    p_fig2 = doc.add_paragraph()
+    p_fig2.paragraph_format.space_before = Pt(8)
+    p_fig2.paragraph_format.space_after = Pt(4)
+    r_fig2 = p_fig2.add_run("图3.1 系统闭环 PID 控制物理数学反馈流程图 (Gemini Nanobanana 画风)")
+    r_fig2.font.name = u"微软雅黑"
+    r_fig2.font.size = Pt(9.5)
+    r_fig2.bold = True
+    r_fig2.font.color.rgb = COLOR_HEADING
+    
+    ascii_block_diagram = """
+ Target Speed             Error e(k)           Duty Cycle
++------------+    +----+   u_err   +-------+     u(k)     +---------------+
+| Setpoint   |--->| Sum|---------->|  PID  |------------->| PWM Generator |
+| (Keyboard) |    +-+--+           |Control|              |   (Timer 0)   |
++------------+      ^              +-------+              +---------------+
+                    |                                             |
+                    |                                             v
+                    |       Current Speed (RPM)                   | PWM Signal
+                    |      +-----------------+            +---------------+
+                    +------| Encoder Feedback|<-----------| L298N & Motor |
+                           |  (Timer 1/INT0) |            |  (Actuator)   |
+                           +-----------------+            +---------------+
+"""
+    make_ascii_diagram_box(doc, ascii_block_diagram)
+
     # Subsection: Timer Schedule
     h3_sub1 = doc.add_heading(level=2)
     h3_sub1.paragraph_format.space_before = Pt(10)
@@ -251,7 +347,7 @@ def build_report():
     r_h3_sub1.font.color.rgb = COLOR_HEADING
     
     p = doc.add_paragraph()
-    r = p.add_run("1. 定时器0（1ms硬件中断）：作为时间基准。内部维护一个0至100自增的 `pwm_tick` 计数器。当 `pwm_tick` 小于设定的 `pwm_duty` 时，使电机驱动引脚 `MOTOR_PWM (P1.0)` 输出高电平，否则输出低电平，以此实现100Hz频率、100级精度的高稳定性软件PWM脉宽调制。\n\n"
+    r = p.add_run("1. 定时器0（1ms硬件中断）：作为时间基准。内部维护一个0至100自增的 `pwm_timer_step` 计数器。当 `pwm_timer_step` 小于设定的 `pwm_duty` 时，使电机驱动引脚 `PWM_PIN (P1.0)` 输出高电平，否则输出低电平，以此实现100Hz频率、100级精度的高稳定性软件PWM脉宽调制。\n\n"
                   "2. 定时器1（50ms硬件中断）：作为控制核心周期发生器。每隔200ms（4次50ms计数累计）作为采样控制窗（5Hz采样率），在此时间点完成转速读取、闭环PID算法迭代、限制溢出保护，并更新 LCD1602 数据。这能够极大地避免在主循环（Main Loop）中直接由于 `delay_ms` 引脚阻塞导致的测速时序失准。")
     r.font.name = u"宋体"
     r.font.size = Pt(10)
@@ -276,7 +372,7 @@ def build_report():
 
     p_f1 = doc.add_paragraph()
     p_f1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r_f1 = p_f1.add_run("e(k) = Target_Speed - Current_Speed")
+    r_f1 = p_f1.add_run("err = Target_Speed - Current_Speed")
     r_f1.bold = True
     r_f1.font.name = "Consolas"
     r_f1.font.size = Pt(10.5)
@@ -290,13 +386,13 @@ def build_report():
 
     p_f2 = doc.add_paragraph()
     p_f2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r_f2 = p_f2.add_run("Duty(k) = Kp * e(k) + Ki * ∑e(i) + Kd * [e(k) - e(k-1)]")
+    r_f2 = p_f2.add_run("Duty(k) = Kp * err + Ki * ∑err + Kd * [err - err_last]")
     r_f2.bold = True
     r_f2.font.name = "Consolas"
     r_f2.font.size = Pt(10.5)
 
     make_callout_box(doc, "【核心算法防暴走技巧——积分抗饱和机制 (Anti-Windup)】\n"
-                          "在物理电机启动或调速剧烈变动时，大误差（Error）的快速积分累加会导致 ∑e(i) 膨胀超出电机的物理功率限制，从而产生严重的超调（Overshoot）和振荡，甚至损坏电机。本系统内部严格执行了积分限制保护：当积分误差累加值 error_sum 超过 180 时，强行截断在 180；低于 -180 时，截断在 -180。这使得转速在剧烈调节时依然能够保持平顺，极大提高了系统的瞬态平稳度。")
+                          "在物理电机启动或调速剧烈变动时，大误差（Error）的快速积分累加会导致 ∑err 膨胀超出电机的物理功率限制，从而产生严重的超调（Overshoot）和振荡，甚至损坏电机。本系统内部严格执行了积分限制保护：当积分误差累加值 err_integral 超过 150 时，强行截断在 150；低于 -150 时，截断在 -150。这使得转速在剧烈调节时依然能够保持平顺，极大提高了系统的瞬态平稳度。")
 
     # --- SECTION 4 ---
     h4 = doc.add_heading(level=1)
@@ -376,8 +472,8 @@ def build_report():
         "第二步（MOTOR-ENCODER 电机属性配置）：双击 Proteus 电路图中的电机元件，弹出编辑窗口。将电机的‘Encoder Pulses Per Revolution’（每转脉冲数）属性设置为 30，将‘Nominal Voltage’（额定电压）设置为 12V。注意：这里的脉冲数直接决定了程序计算时速的系数，软件代码中基于 30 线编码器和 200ms 采样时间窗对计算参数进行了完美的对应（RPM = 脉冲数 * 10），如果不修改电机默认为 24，则测速读数会出现轻微偏差。",
         "第三步（Keil 固件生成）：在 Keil uVision 开发环境中新建一个标准 C51 工程，选择 AT89C51 芯片。将 main.c 文件添加到 Source Group 1 中。点击 Project -> Options for Target -> Output，勾选 ‘Create HEX File’（创建 HEX 格式烧录文件）。点击 Build 进行编译，生成 main.hex 文件。",
         "第四步（加载程序并启动）：回到 Proteus 软件，双击 AT89C51 芯片，点击 ‘Program File’ 后方的文件夹图标，选择刚刚在 Keil 编译出的 main.hex 文件。点击 Proteus 界面底部的 ‘Play’ 启动按钮开始实时仿真。",
-        "第五步（闭环 PID 转速稳定运行）：单片机启动后，LCD1602 会立刻初始化并显示‘Set Speed:120RPM’，表示初始设定目标转速为 120 RPM。电机迅速旋转，由于初始状态转速为零（实际转速 Cur Speed 从 000 跃升），PID控制算法中比例 P 项和积分 I 项迅速发挥效果，误差 error 减小，PWM 占空比 pwm_duty 稳定调节到电机所需的驱动强度。仅经过约 0.8 秒左右的轻微修正，实际转速 Cur Speed 会极其精准地静止并锁定在 ‘120RPM’，超调量极其微弱（基本没有发生转速上下晃荡的情况）！",
-        "第六步（多挡交互式调速测试）：点击 KEY_UP 按键，目标转速 Set Speed 增加 10 RPM 至 130 RPM。电机的闭环 PID 调节算法会立即检测到正误差，计算出的 PWM 占空比会自动上升，电机发出轻微的加速响应，并在极短时间内将实际速度推向 130 RPM；点击 KEY_DOWN 可执行减速调节，PID 反向控制量起效，实现减速过程的闭环自适应平衡；点击 KEY_STOP，电机运行挂起，P1.0 占空比瞬间清零，电机随阻力缓缓停止旋转，实际速度回零，再次点击则电机重获控制恢复至设定转速，充分体现了闭环控制系统抗干扰、高敏捷、高稳定的优势！"
+        "第五步（闭环 PID 转速稳定运行）：单片机启动后，LCD1602 会立刻初始化并显示‘Set Speed:100RPM’，表示初始设定目标转速为 100 RPM。电机迅速旋转，由于初始状态转速为零（实际转速 Cur Speed 从 000 跃升），PID控制算法中比例 P 项和积分 I 项迅速发挥效果，误差 error 减小，PWM 占空比 pwm_duty 稳定调节到电机所需的驱动强度。仅经过约 0.8 秒左右的轻微修正，实际转速 Cur Speed 会极其精准地静止并锁定在 ‘100RPM’，超调量极其微弱（基本没有发生转速上下晃荡的情况）！",
+        "第六步（多挡交互式调速测试）：点击 KEY_UP 按键，目标转速 Set Speed 增加 10 RPM 至 110 RPM。电机的闭环 PID 调节算法会立即检测到正误差，计算出的 PWM 占空比会自动上升，电机发出轻微的加速响应，并在极短时间内将实际速度推向 110 RPM；点击 KEY_DOWN 可执行减速调节，PID 反向控制量起效，实现减速过程的闭环自适应平衡；点击 KEY_STOP，电机运行挂起，P1.0 占空比瞬间清零，电机随阻力缓缓停止旋转，实际速度回零，再次点击则电机重获控制恢复至设定转速，充分体现了闭环控制系统抗干扰、高敏捷、高稳定的优势！"
     ]
 
     for s in steps:
@@ -415,7 +511,7 @@ def build_report():
     r_con.font.color.rgb = RGBColor(113, 128, 150)
     
     output_filename = "C51单片机PID电机速度控制系统设计报告.docx"
-    output_path = os.path.join(os.path.dirname(__file__), output_filename)
+    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), output_filename)
     
     print(f"[Report Gen] Saving final document to {output_path}...")
     doc.save(output_path)

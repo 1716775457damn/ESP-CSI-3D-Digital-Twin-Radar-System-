@@ -1,5 +1,4 @@
 use std::sync::{Arc, RwLock};
-use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -36,6 +35,14 @@ struct CsiMetrics {
     packet_count: u64,
     subcarriers: Vec<f32>,
     subcarriers_phase: Vec<f32>,
+}
+
+// --- CSI PACKET STRUCT WITH FIXED MAXIMUM SUBCARRIERS (STABLE STACK ALLOCATION) ---
+#[derive(Clone, Copy, Debug)]
+struct CsiRawPacket {
+    amplitudes: [f32; 64],
+    phases: [f32; 64],
+    len: usize,
 }
 
 // --- C-FFI CALLBACK WITH CONCURRENCY RATE LIMITER & BSSID FILTER ---
@@ -82,33 +89,37 @@ unsafe extern "C" fn csi_rx_cb(ctx: *mut core::ffi::c_void, info: *mut wifi_csi_
         return;
     }
 
-    let mut subcarriers_amp = Vec::with_capacity(len as usize / 2);
-    let mut subcarriers_phase = Vec::with_capacity(len as usize / 2);
+    // Zero dynamic heap allocations! Extract data directly onto fixed-size stack arrays
+    let num_subcarriers = (len as usize / 2).min(64);
+    if num_subcarriers == 0 {
+        return;
+    }
+
+    let mut amp_arr = [0.0; 64];
+    let mut phase_arr = [0.0; 64];
 
     // Each subcarrier uses 2 bytes: Real part (I) and Imaginary part (Q)
-    for i in (0..len).step_by(2) {
-        if i + 1 >= len {
-            break;
-        }
-        let r_val = *buf.offset(i) as f32;
-        let i_val = *buf.offset(i + 1) as f32;
+    for i in 0..num_subcarriers {
+        let r_val = *buf.offset((i * 2) as isize) as f32;
+        let i_val = *buf.offset((i * 2 + 1) as isize) as f32;
         
         // Calculate Amplitude = sqrt(I^2 + Q^2)
-        let amp = (r_val * r_val + i_val * i_val).sqrt();
+        amp_arr[i] = (r_val * r_val + i_val * i_val).sqrt();
         // Calculate Phase = atan2(Q, I)
-        let phase = i_val.atan2(r_val);
-        
-        subcarriers_amp.push(amp);
-        subcarriers_phase.push(phase);
+        phase_arr[i] = i_val.atan2(r_val);
     }
 
-    if !subcarriers_amp.is_empty() {
-        let tx_mutex = &*(ctx as *const std::sync::Mutex<Sender<(Vec<f32>, Vec<f32>)>>);
-        if let Ok(tx) = tx_mutex.lock() {
-            let _ = tx.send((subcarriers_amp, subcarriers_phase));
-        }
+    // Send packet via Lock-Free try_send on pre-allocated SyncSender to avoid blocking Wi-Fi thread
+    let tx_mutex = &*(ctx as *const std::sync::Mutex<std::sync::mpsc::SyncSender<CsiRawPacket>>);
+    if let Ok(tx) = tx_mutex.lock() {
+        let _ = tx.try_send(CsiRawPacket {
+            amplitudes: amp_arr,
+            phases: phase_arr,
+            len: num_subcarriers,
+        });
     }
 }
+
 
 fn main() -> Result<()> {
     // Link patches
@@ -240,7 +251,9 @@ fn main() -> Result<()> {
     }
 
     // --- CHANNEL-BASED SIGNAL PIPELINE ---
-    let (tx, rx) = channel::<(Vec<f32>, Vec<f32>)>();
+    // Use pre-allocated sync_channel of bounded capacity 32. 
+    // This pre-allocates queue slots on setup, guaranteeing absolutely zero runtime heap allocations!
+    let (tx, rx) = std::sync::mpsc::sync_channel::<CsiRawPacket>(32);
     let tx_mutex = std::sync::Mutex::new(tx);
     let tx_boxed = Box::new(tx_mutex);
     let tx_ptr = Box::into_raw(tx_boxed) as *mut core::ffi::c_void;
@@ -255,8 +268,13 @@ fn main() -> Result<()> {
         let alpha = 0.1;      // EMA filter coefficient
         let mut ema_val: Option<f32> = None;
 
-        while let Ok((subcarriers_amp, subcarriers_phase)) = rx.recv() {
-            let count = subcarriers_amp.len();
+        while let Ok(packet) = rx.recv() {
+            let count = packet.len;
+            if count == 0 {
+                continue;
+            }
+            let subcarriers_amp = packet.amplitudes[0..count].to_vec();
+            let subcarriers_phase = packet.phases[0..count].to_vec();
             if count == 0 {
                 continue;
             }
@@ -348,6 +366,9 @@ fn main() -> Result<()> {
         if err != ESP_OK {
             log::error!("esp_wifi_set_promiscuous failed: {}", err);
         }
+
+        // Maximize Wi-Fi Tx Power to 20dBm (80 quarter-dBm units) for robust penetrating sensing range
+        esp_idf_sys::esp_wifi_set_max_tx_power(80);
     }
 
     // --- HTTP & WEBSOCKETS SERVER ---
@@ -358,15 +379,18 @@ fn main() -> Result<()> {
     };
     let mut server = EspHttpServer::new(&http_config)?;
 
-    // HTTP Endpoint: Serve Local Dashboard
+    // HTTP Endpoint: Serve Local Dashboard with 4x Gzip network-level compression
     server.fn_handler("/", Method::Get, move |req| {
-        let html_content = include_str!("index.html");
+        let html_content = include_bytes!("index.html.gz");
         let mut response = req.into_response(
             200, 
             Some("OK"), 
-            &[("Content-Type", "text/html; charset=utf-8")]
+            &[
+                ("Content-Type", "text/html; charset=utf-8"),
+                ("Content-Encoding", "gzip")
+            ]
         )?;
-        response.write(html_content.as_bytes())?;
+        response.write(html_content)?;
         Ok::<(), esp_idf_svc::io::EspIOError>(())
     })?;
 

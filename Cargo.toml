@@ -11,10 +11,13 @@ name = "rust-esp32-wifi"
 harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 
 [profile.dev]
-debug = true    # Symbols are nice, and they don't increase the size on Flash
+debug = true
 opt-level = "z"
 
 [patch.crates-io]

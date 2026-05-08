@@ -136,7 +136,7 @@ def build_report():
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_title.paragraph_format.space_before = Pt(36)
     p_title.paragraph_format.space_after = Pt(12)
-    run_title = p_title.add_run("基于51单片机的直流电机PID闭环控制系统\n设计与仿真运行报告\n(Gemini SOTA 全新极简高兼容版)")
+    run_title = p_title.add_run("基于51单片机的直流电机PID闭环控制系统\n设计与仿真运行报告")
     run_title.font.name = u"微软雅黑"
     run_title.font.size = Pt(20)
     run_title.bold = True
@@ -212,7 +212,7 @@ def build_report():
     p_fig1 = doc.add_paragraph()
     p_fig1.paragraph_format.space_before = Pt(8)
     p_fig1.paragraph_format.space_after = Pt(4)
-    r_fig1 = p_fig1.add_run("图2.1 系统Proteus核心硬件连接CAD框图 (Gemini Nanobanana 画风)")
+    r_fig1 = p_fig1.add_run("图2.1 系统Proteus核心硬件连接CAD框图")
     r_fig1.font.name = u"微软雅黑"
     r_fig1.font.size = Pt(9.5)
     r_fig1.bold = True
@@ -314,7 +314,7 @@ def build_report():
     p_fig2 = doc.add_paragraph()
     p_fig2.paragraph_format.space_before = Pt(8)
     p_fig2.paragraph_format.space_after = Pt(4)
-    r_fig2 = p_fig2.add_run("图3.1 系统闭环 PID 控制物理数学反馈流程图 (Gemini Nanobanana 画风)")
+    r_fig2 = p_fig2.add_run("图3.1 系统闭环 PID 控制物理数学反馈流程图")
     r_fig2.font.name = u"微软雅黑"
     r_fig2.font.size = Pt(9.5)
     r_fig2.bold = True

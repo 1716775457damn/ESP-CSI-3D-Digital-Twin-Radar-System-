@@ -255,9 +255,9 @@ fn main() -> Result<()> {
     }
 
     // --- UDP STREAMING SOCKET SETUP & CLIENT HANDSHAKE TRACKER ---
-    let udp_socket = std::net::UdpSocket::bind("0.0.0.0:5005")?;
-    let udp_socket_recv = udp_socket.try_clone()?;
-    let udp_socket_send = udp_socket.try_clone()?;
+    let udp_socket = Arc::new(std::net::UdpSocket::bind("0.0.0.0:5005")?);
+    let udp_socket_recv = udp_socket.clone();
+    let udp_socket_send = udp_socket.clone();
 
     // Spawn a background UDP listener thread to auto-register/update the streaming destination address
     std::thread::spawn(move || {

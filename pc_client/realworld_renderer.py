@@ -509,42 +509,44 @@ class RealWorldRenderer:
             if len(b_pts) > 1:
                 pygame.draw.lines(self.screen, self.colors["cyan"], False, b_pts, width=1)
                 
-        # --- DRAW REAL-TIME CSI PHYSICAL SIGNAL LANDSCAPE (8x8 3D Grid) ---
-        grid_res = 8
+        # --- DRAW REAL-TIME CSI PHYSICAL SIGNAL LANDSCAPE (Concentric Polar 3D Grid) ---
+        # Centering modeling on the ESP32 at the exact middle of the 3D space (0.5, 0.5)
         subcarriers = self.latest_metrics["subcarriers"]
-        subcarriers_phase = self.latest_metrics["subcarriers_phase"]
         max_sub = max(subcarriers) if len(subcarriers) > 0 and max(subcarriers) > 0 else 1.0
         
-        for i in range(grid_res):
-            for j in range(grid_res):
-                idx = i * grid_res + j
+        num_rings = 8
+        num_sectors = 8
+        
+        for ring in range(num_rings):
+            r0 = ring / num_rings * 0.48
+            r1 = (ring + 1) / num_rings * 0.48
+            for sector in range(num_sectors):
+                idx = ring * num_sectors + sector
                 amp_val = subcarriers[idx] if idx < len(subcarriers) else 0.0
-                phase_val = subcarriers_phase[idx] if idx < len(subcarriers) else 0.0
                 
                 # Height driven dynamically by real-time subcarrier amplitude
                 height_val = float((amp_val / max_sub) * 35.0)
                 
-                # Color gradient mapping from cool dark purple/blue to vibrant warm cyan/orange (CSI amplitude)
+                # Color gradient mapping from cool emerald/teal to high-tech radar cyan/blue
                 norm_amp = amp_val / max_sub
-                r = int(norm_amp * 139 + (1 - norm_amp) * 15)
-                g = int(norm_amp * 92 + (1 - norm_amp) * 23)
-                b = int(norm_amp * 246 + (1 - norm_amp) * 42)
+                r = int(norm_amp * 16 + (1 - norm_amp) * 163)
+                g = int(norm_amp * 185 + (1 - norm_amp) * 191)
+                b = int(norm_amp * 129 + (1 - norm_amp) * 250)
                 tile_color = (r, g, b)
                 
-                x_val_0 = i / grid_res
-                x_val_1 = (i + 1) / grid_res
-                y_val_0 = j / grid_res
-                y_val_1 = (j + 1) / grid_res
+                theta0 = sector * (2 * np.pi / num_sectors)
+                theta1 = (sector + 1) * (2 * np.pi / num_sectors)
                 
-                pt_a = self._to_iso(x_val_0, y_val_0, height_val)
-                pt_b = self._to_iso(x_val_1, y_val_0, height_val)
-                pt_c = self._to_iso(x_val_1, y_val_1, height_val)
-                pt_d = self._to_iso(x_val_0, y_val_1, height_val)
+                # Polar coordinates to Cartesian relative to center (0.5, 0.5)
+                pt_a = self._to_iso(0.5 + r0 * np.cos(theta0), 0.5 + r0 * np.sin(theta0), height_val)
+                pt_b = self._to_iso(0.5 + r1 * np.cos(theta0), 0.5 + r1 * np.sin(theta0), height_val)
+                pt_c = self._to_iso(0.5 + r1 * np.cos(theta1), 0.5 + r1 * np.sin(theta1), height_val)
+                pt_d = self._to_iso(0.5 + r0 * np.cos(theta1), 0.5 + r0 * np.sin(theta1), height_val)
                 
-                pt_a_down = self._to_iso(x_val_0, y_val_0, 0)
-                pt_b_down = self._to_iso(x_val_1, y_val_0, 0)
-                pt_c_down = self._to_iso(x_val_1, y_val_1, 0)
-                pt_d_down = self._to_iso(x_val_0, y_val_1, 0)
+                pt_a_down = self._to_iso(0.5 + r0 * np.cos(theta0), 0.5 + r0 * np.sin(theta0), 0)
+                pt_b_down = self._to_iso(0.5 + r1 * np.cos(theta0), 0.5 + r1 * np.sin(theta0), 0)
+                pt_c_down = self._to_iso(0.5 + r1 * np.cos(theta1), 0.5 + r1 * np.sin(theta1), 0)
+                pt_d_down = self._to_iso(0.5 + r0 * np.cos(theta1), 0.5 + r0 * np.sin(theta1), 0)
                 
                 # Top face of 3D cell column
                 pygame.draw.polygon(self.screen, tile_color, [pt_a, pt_b, pt_c, pt_d])
@@ -581,20 +583,26 @@ class RealWorldRenderer:
         lbl_subc = self.fonts["mono"].render("SUB-SPACE C (43-64)", True, self.colors["text_muted"])
         self.screen.blit(lbl_subc, self._to_iso(0.82, 0.45, 15))
         
-        # --- DRAW COEXISTING ROUTER TX & ESP32 RX NODES ---
-        # Router TX (located at bottom wall, x=0, y=0.5)
-        tx_pos = self._to_iso(0.05, 0.5, 30)
-        pygame.draw.circle(self.screen, self.colors["cyan"], tx_pos, 8)
-        pygame.draw.circle(self.screen, self.colors["bg"], tx_pos, 4)
+        # --- DRAW ESP32 CORE RADAR BEACON (Center epicenter, x=0.5, y=0.5) ---
+        esp_center = self._to_iso(0.5, 0.5, 0)
+        esp_top = self._to_iso(0.5, 0.5, 45)
+        # Draw glowing antenna station pole
+        pygame.draw.line(self.screen, self.colors["cyan"], esp_center, esp_top, 3)
+        pygame.draw.circle(self.screen, self.colors["cyan"], esp_top, 8)
+        pygame.draw.circle(self.screen, self.colors["bg"], esp_top, 4)
         
-        # ESP32 RX (located at opposite wall, x=0.95, y=0.5)
-        rx_pos = self._to_iso(0.95, 0.5, 30)
-        pygame.draw.circle(self.screen, self.colors["purple"], rx_pos, 8)
-        pygame.draw.circle(self.screen, self.colors["bg"], rx_pos, 4)
+        # Draw ESP32 node label
+        lbl_esp = self.fonts["mono"].render("ESP32 CORE", True, self.colors["cyan"])
+        self.screen.blit(lbl_esp, self._to_iso(0.50, 0.42, 60))
+        
+        # Router TX (located at bottom wall, x=0.08, y=0.5 as a secondary sender)
+        tx_pos = self._to_iso(0.08, 0.5, 20)
+        pygame.draw.circle(self.screen, self.colors["purple"], tx_pos, 6)
+        pygame.draw.circle(self.screen, self.colors["bg"], tx_pos, 3)
         
         # Antennas wave propagation ring emitters
         if self.frame_count % 40 == 0:
-            self.antenna_waves.append({"pos": (0.05, 0.5), "r": 0, "color": self.colors["cyan"]})
+            self.antenna_waves.append({"pos": (0.5, 0.5), "r": 0, "color": self.colors["cyan"]})
         
         # Draw emitting WiFi rings
         for r_wave in self.antenna_waves[:]:
@@ -611,7 +619,7 @@ class RealWorldRenderer:
                 rad_x = r_wave["pos"][0] + r_wave["r"] * math.cos(theta)
                 rad_y = r_wave["pos"][1] + r_wave["r"] * math.sin(theta)
                 if 0 <= rad_x <= 1 and 0 <= rad_y <= 1:
-                    pts.append(self._to_iso(rad_x, rad_y, 30))
+                    pts.append(self._to_iso(rad_x, rad_y, 45))
             if len(pts) > 2:
                 # Fade color based on radius
                 alpha = int(255 * (1.0 - (r_wave["r"] / 1.5)))
